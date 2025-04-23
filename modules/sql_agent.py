@@ -1,8 +1,7 @@
 # arquivo: modules/sql_agent.py
 #from langchain_chroma import Chroma
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_community.chat_models import ChatOpenAI
+from langchain_chroma import Chroma
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 # Importações corrigidas:
 from langchain_community.agent_toolkits.sql.base import create_sql_agent
 from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
@@ -260,7 +259,6 @@ class DVDRentalTextToSQL:
             embedding=self.embeddings,
             persist_directory=config.vector_store_dir
         )
-        vector_store.persist()  # Garante que foi salvo no disco
     
         # Salva o hash do schema atual
         with open(schema_hash_file, "w") as f:
