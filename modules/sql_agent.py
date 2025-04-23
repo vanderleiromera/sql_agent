@@ -18,6 +18,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from .config import Config
 # Importações adicionadas para Callbacks
 from langchain.callbacks.base import BaseCallbackHandler
+# --- Importa o prompt do arquivo prompts.py ---
+from .prompts import SAFETY_PREFIX
 
 class SchemaExtractor:
     """Classe para extrair metadados do esquema do banco de dados"""
@@ -233,13 +235,13 @@ class DVDRentalTextToSQL:
         self.vector_store = self._get_or_create_schema_embeddings()
         self.toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
 
-        # REMOVER return_intermediate_steps=True, pois não funcionou
+        # --- Usa o prefixo importado ---
         self.agent = create_sql_agent(
             llm=self.llm,
             toolkit=self.toolkit,
             verbose=True,
-            agent_type="openai-tools"
-            # return_intermediate_steps=True # Removido
+            agent_type="openai-tools",
+            prefix=SAFETY_PREFIX # Usa a constante importada
         )
         # Instancia o callback handler
         self.query_callback_handler = SQLQueryCaptureCallback()
