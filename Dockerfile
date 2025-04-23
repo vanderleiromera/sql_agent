@@ -17,7 +17,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copia o restante do código da aplicação
-COPY modules /app/
+COPY ./modules /app/modules
+COPY data /app/
 COPY app.py /app/
 
 # Expõe a porta padrão do Streamlit
