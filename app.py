@@ -53,36 +53,54 @@ def main():
     
     with col1:
         st.header("Faça sua pergunta")
-        user_question = st.text_area(
+
+        # Inicializa a chave 'question' no session_state se não existir
+        if 'question' not in st.session_state:
+            st.session_state.question = ""
+
+        # Usa st.session_state.question para controlar o valor do text_area
+        # O valor retornado pelo text_area atualiza user_question_input
+        user_question_input = st.text_area(
             "O que você gostaria de saber?",
+            value=st.session_state.question,  # Vincula ao session_state
             height=100,
-            placeholder="Ex: Quais são os 5 clientes que mais alugaram filmes?"
+            placeholder="Ex: Quais são os 5 clientes que mais alugaram filmes?",
+            key="user_question_area" # Adiciona uma chave para estabilidade
         )
-        
+        # Atualiza o session_state se o usuário digitar manualmente
+        st.session_state.question = user_question_input
+
         examples = [
             "Quais são os 5 filmes mais alugados?",
             "Qual a receita total por categoria de filme?",
             "Quais clientes estão com pagamentos em atraso?"
         ]
-        
+
         st.write("Ou tente um exemplo:")
-        for ex in examples:
-            if st.button(ex):
-                user_question = ex
+        # Itera sobre os exemplos para criar os botões
+        for i, ex in enumerate(examples):
+            # Usa uma chave única para cada botão
+            if st.button(ex, key=f"example_{i}"):
+                # Atualiza o session_state com o exemplo clicado
                 st.session_state.question = ex
-        
+                # Força um rerun para atualizar o text_area imediatamente
+                st.rerun()
+
         if st.button("Executar consulta", type="primary"):
-            if not user_question:
-                st.error("Por favor, digite uma pergunta!")
-                return
-            
+            # Verifica se há algo no session_state.question (seja de exemplo ou digitado)
+            if not st.session_state.question:
+                st.error("Por favor, digite uma pergunta ou selecione um exemplo!")
+                return # Não use st.stop() aqui, apenas retorne
+
             with st.spinner("Processando sua pergunta..."):
+                # Usa a pergunta do session_state
+                current_question = st.session_state.question
                 # Encontrar tabelas relevantes
-                relevant_tables = sql_agent.find_relevant_tables(user_question)
+                relevant_tables = sql_agent.find_relevant_tables(current_question)
                 st.session_state.tables = relevant_tables
-                
+
                 # Executar consulta
-                result = sql_agent.query(user_question)
+                result = sql_agent.query(current_question)
                 st.session_state.result = result
     
     with col2:
