@@ -14,8 +14,10 @@ import pickle
 import pandas as pd
 import hashlib
 import json
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from .config import Config
+# Importações adicionadas para Callbacks
+from langchain.callbacks.base import BaseCallbackHandler
 
 class SchemaExtractor:
     """Classe para extrair metadados do esquema do banco de dados"""
@@ -171,6 +173,46 @@ INDEXES:
         
         return documents
 
+# --- Classe de Callback para Capturar a Query SQL ---
+class SQLQueryCaptureCallback(BaseCallbackHandler):
+    """Callback handler to capture the input query for SQL tools."""
+    def __init__(self):
+        super().__init__()
+        self.sql_query: Optional[str] = None
+
+    def on_tool_start(
+        self, serialized: Dict[str, Any], input_str: str, **kwargs: Any
+    ) -> Any:
+        """Called when the tool starts running."""
+        # Verifica se a ferramenta é uma das ferramentas SQL
+        tool_name = serialized.get("name")
+        if tool_name in ['sql_db_query', 'query-sql', 'sql_db_query_checker']:
+            # O input_str pode ser a query diretamente ou um JSON stringificado
+            potential_query = None
+            try:
+                # Tenta decodificar como JSON se for um dict stringificado
+                input_data = json.loads(input_str)
+                if isinstance(input_data, dict) and 'query' in input_data:
+                    potential_query = input_data['query']
+            except json.JSONDecodeError:
+                # Se não for JSON, assume que input_str é a query
+                potential_query = input_str
+            except TypeError:
+                # Se input_str não for string-like
+                potential_query = str(input_str) # Tenta converter
+
+            # Armazena apenas se for uma query SELECT (para evitar armazenar resultados de checker)
+            if potential_query and isinstance(potential_query, str) and "SELECT" in potential_query.upper():
+                self.sql_query = potential_query
+                print(f"--- Callback: Query SQL capturada: {self.sql_query} ---") # Log no console
+
+    def get_captured_query(self) -> Optional[str]:
+        """Returns the captured SQL query."""
+        return self.sql_query
+
+    def reset(self):
+        """Resets the captured query."""
+        self.sql_query = None
 
 class DVDRentalTextToSQL:
     """Classe principal para processamento de consultas text-to-SQL"""
@@ -179,7 +221,7 @@ class DVDRentalTextToSQL:
         config = Config()
         self.db_uri = db_uri
         self.use_checkpoint = use_checkpoint
-        self.force_reprocess = force_reprocess  # Nova opção
+        self.force_reprocess = force_reprocess
         self.schema_extractor = SchemaExtractor(db_uri)
         self.embeddings = OpenAIEmbeddings(api_key=config.openai_api_key)
         self.llm = ChatOpenAI(
@@ -188,18 +230,19 @@ class DVDRentalTextToSQL:
             api_key=config.openai_api_key
         )
         self.db = SQLDatabase.from_uri(db_uri)
-    
-        # Inicializa vector store com schema
         self.vector_store = self._get_or_create_schema_embeddings()
-    
-        # Configura toolkit e agente
         self.toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
+
+        # REMOVER return_intermediate_steps=True, pois não funcionou
         self.agent = create_sql_agent(
             llm=self.llm,
             toolkit=self.toolkit,
             verbose=True,
             agent_type="openai-tools"
-        )   
+            # return_intermediate_steps=True # Removido
+        )
+        # Instancia o callback handler
+        self.query_callback_handler = SQLQueryCaptureCallback()
 
     def _get_or_create_schema_embeddings(self) -> Chroma:
         """Carrega embeddings persistidos ou cria novos com detecção de mudanças"""
@@ -324,15 +367,26 @@ Use joins quando apropriado e prefira JOINs explícitos (ex: INNER JOIN) em vez 
 """
         return enhanced_query
     
-    def query(self, user_question: str) -> Dict[str, Any]:
-        """Processa pergunta do usuário e retorna resultado SQL"""
-        # Encontra tabelas relevantes
+    def query(self, user_question: str) -> Tuple[Dict[str, Any], Optional[str]]:
+        """
+        Processa pergunta do usuário, captura a query SQL via callback,
+        e retorna o resultado do agente e a query capturada.
+        """
+        # Reseta o callback antes de cada consulta
+        self.query_callback_handler.reset()
+
         relevant_tables = self.find_relevant_tables(user_question)
         print(f"Tabelas relevantes: {', '.join(relevant_tables)}")
-        
-        # Enriquece a pergunta com informações das tabelas
         enhanced_question = self.enhance_query_with_table_info(user_question, relevant_tables)
-        
-        # Executa o agente
-        result = self.agent.invoke({"input": enhanced_question})
-        return result
+
+        # Executa o agente passando o callback handler
+        result = self.agent.invoke(
+            {"input": enhanced_question},
+            config={"callbacks": [self.query_callback_handler]} # Passa o handler aqui
+        )
+
+        # Obtém a query capturada pelo callback
+        captured_query = self.query_callback_handler.get_captured_query()
+
+        # Retorna tanto o resultado quanto a query capturada
+        return result, captured_query

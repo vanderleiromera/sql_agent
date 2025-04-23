@@ -4,13 +4,19 @@ import os
 from dotenv import load_dotenv
 from modules.sql_agent import DVDRentalTextToSQL
 from modules.config import Config
+import pandas as pd
+import json
+import sys
+
+# Adiciona o diretório pai ao path para importar módulos
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Carrega variáveis de ambiente
 load_dotenv()
 
 # Configuração da página Streamlit
 st.set_page_config(
-    page_title="SQL Agent App",
+    page_title="DVD Rental SQL Agent",
     page_icon="🔍",
     layout="wide"
 )
@@ -22,8 +28,8 @@ def initialize_sql_agent(force_reprocess=False):
     return DVDRentalTextToSQL(config.db_uri, use_checkpoint=True, force_reprocess=force_reprocess)
 
 def main():
-    st.title("🔍 Consultas em Linguagem Natural para SQL")
-    st.subheader("Transforme perguntas em consultas SQL")
+    st.title("🤖 Agente SQL para Consulta de Locadora DVD")
+    st.write("Faça perguntas em linguagem natural sobre os dados da locadora.")
     
     # Sidebar com informações
     with st.sidebar:
@@ -69,13 +75,13 @@ def main():
         )
         # Atualiza o session_state se o usuário digitar manualmente
         st.session_state.question = user_question_input
-
+        
         examples = [
             "Quais são os 5 filmes mais alugados?",
             "Qual a receita total por categoria de filme?",
             "Quais clientes estão com pagamentos em atraso?"
         ]
-
+        
         st.write("Ou tente um exemplo:")
         # Itera sobre os exemplos para criar os botões
         for i, ex in enumerate(examples):
@@ -85,63 +91,69 @@ def main():
                 st.session_state.question = ex
                 # Força um rerun para atualizar o text_area imediatamente
                 st.rerun()
-
+        
         if st.button("Executar consulta", type="primary"):
             # Verifica se há algo no session_state.question (seja de exemplo ou digitado)
             if not st.session_state.question:
                 st.error("Por favor, digite uma pergunta ou selecione um exemplo!")
                 return # Não use st.stop() aqui, apenas retorne
-
+            
             with st.spinner("Processando sua pergunta..."):
                 # Usa a pergunta do session_state
                 current_question = st.session_state.question
                 # Encontrar tabelas relevantes
                 relevant_tables = sql_agent.find_relevant_tables(current_question)
                 st.session_state.tables = relevant_tables
-
+                
                 # Executar consulta
-                result = sql_agent.query(current_question)
-                st.session_state.result = result
+                agent_result, captured_sql_query = sql_agent.query(current_question)
+                st.session_state.result = agent_result
+                st.session_state.sql_query = captured_sql_query
+                
+                # Limpa tabelas relevantes antigas se existirem
+                if 'tables' in st.session_state:
+                    del st.session_state['tables']
+                
+                # Atualiza tabelas relevantes (opcional, pode vir do agente se modificado)
+                # relevant_tables = sql_agent.find_relevant_tables(current_question)
+                # st.session_state.tables = relevant_tables
     
     with col2:
-        st.header("Resultados")
+        st.header("Resposta do Agente")
         
-        # Mostrar tabelas relevantes
-        if "tables" in st.session_state:
-            st.subheader("Tabelas identificadas")
-            st.write(", ".join(st.session_state.tables))
+        # Exibe a query SQL se foi capturada
+        if "sql_query" in st.session_state and st.session_state.sql_query:
+            st.subheader("Consulta SQL Gerada")
+            st.code(st.session_state.sql_query, language="sql")
+        elif "result" in st.session_state: # Exibe info apenas se houve uma execução
+            st.subheader("Consulta SQL Gerada")
+            st.info("Consulta SQL não foi capturada pelo callback nesta execução.")
         
-        # Mostrar resultados
+        st.divider() # Separador
+
+        # Exibe o resultado final do agente
         if "result" in st.session_state:
-            result = st.session_state.result
-            
-            st.subheader("Consulta SQL")
-            for action in result.get("intermediate_steps", []):
-                if isinstance(action, tuple) and len(action) >= 2:
-                    tool = action[0]
-                    if tool.name == "query_sql_db":
-                        st.code(tool.args.get("query"), language="sql")
-            
             st.subheader("Resultados")
-            if "output" in result:
-                try:
-                    # Tenta converter para dataframe se possível
-                    import pandas as pd
-                    if isinstance(result["output"], str) and result["output"].strip().startswith("|"):
-                        # Resultado em formato markdown table
-                        st.write(result["output"])
-                    else:
-                        st.write(result["output"])
-                except:
-                    st.write(result["output"])
+            result_data = st.session_state.result
+            final_answer = "Erro ao obter 'output'"
+
+            if isinstance(result_data, dict):
+                final_answer = result_data.get("output", "Chave 'output' não encontrada no resultado.")
+            elif isinstance(result_data, str):
+                final_answer = result_data
             else:
-                st.info("Nenhum resultado retornado")
-            
-            # Explicação adicional
-            st.subheader("Explicação")
-            explanation = result.get("output", "")
-            if isinstance(explanation, str):
-                st.write(explanation)
+                final_answer = str(result_data)
+
+            # Tenta exibir o resultado final (geralmente texto interpretado)
+            st.write(final_answer)
+
+            # Opcional: Exibir tabelas relevantes se armazenadas
+            # if "tables" in st.session_state and st.session_state.tables:
+            #    st.subheader("Tabelas Relevantes Identificadas")
+            #    st.write(", ".join(st.session_state.tables))
+
+        else:
+            st.write("Aguardando a execução de uma consulta...")
 
 if __name__ == "__main__":
     main()
