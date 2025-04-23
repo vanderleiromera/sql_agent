@@ -20,6 +20,53 @@ from .config import Config
 from langchain.callbacks.base import BaseCallbackHandler
 # --- Importa o prompt do arquivo prompts.py ---
 from .prompts import SAFETY_PREFIX
+import time
+
+ODOO_COMPLEX_TABLES = {
+    'ir_filters': {
+        'skip_sample_data': True,
+        'max_column_length': 100  # limitar tamanho das colunas serializada
+    },
+    'ir_actions': {
+        'skip_sample_data': True
+    },
+    'ir_ui_view': {
+        'skip_sample_data': True
+    },
+    'ir_translation': {
+        'skip_sample_data': True
+    }
+}
+
+PROBLEMATIC_TABLES = {
+    'ir_filters': {'skip': True},
+    'ir_translation': {'skip': True},
+    'ir_ui_view': {'skip': True},
+    'table_privileges': {
+        'skip_sample_data': True,
+        'reserved_words': ['select', 'update', 'insert', 'delete']
+    },
+    'timeline': {
+        'skip_sample_data': True,
+        'reserved_words': ['default']
+    },
+    'bve_view_line': {
+        'skip_sample_data': True,
+        'reserved_words': ['column']
+    },
+    'core_user': {'skip': True},
+    'metabase_field': {'skip': True},
+    'view_log': {'skip': True},
+    'audit_log': {'skip': True}
+}
+
+SPECIAL_TABLES = {
+    'l10n_br_fiscal_dfe': {'skip_indexes': True},
+    'qrtz_calendars': {'skip_indexes': True},
+    'nfe_40_fordia': {'skip_indexes': True},
+    'metabase_field': {'skip_indexes': True},
+    'query': {'skip_indexes': True}
+}
 
 class SchemaExtractor:
     """Classe para extrair metadados do esquema do banco de dados"""
@@ -29,6 +76,13 @@ class SchemaExtractor:
         self.engine = create_engine(db_uri)
         self.inspector = inspect(self.engine)
         self.metadata = MetaData()
+        self.is_odoo = self._check_if_odoo()
+    
+    def _check_if_odoo(self) -> bool:
+        """Verifica se é um banco Odoo verificando tabelas características"""
+        tables = self.get_all_tables()
+        odoo_tables = {'ir_module_module', 'res_company', 'res_users'}
+        return any(table in tables for table in odoo_tables)
     
     def get_all_tables(self) -> List[str]:
         """Retorna lista de todas as tabelas no banco de dados"""
@@ -69,109 +123,187 @@ class SchemaExtractor:
         return self.inspector.get_indexes(table_name)
     
     def get_table_sample_data(self, table_name: str, sample_size: int = 3) -> pd.DataFrame:
-        """Retorna amostra de dados de uma tabela"""
+        """Retorna amostra de dados de uma tabela com tratamento para palavras reservadas"""
+        if table_name in PROBLEMATIC_TABLES:
+            if PROBLEMATIC_TABLES[table_name].get('skip', False):
+                return pd.DataFrame()
+            
+            if PROBLEMATIC_TABLES[table_name].get('skip_sample_data', False):
+                return pd.DataFrame()
+            
+            # Trata palavras reservadas
+            reserved_words = PROBLEMATIC_TABLES[table_name].get('reserved_words', [])
+            if reserved_words:
+                try:
+                    columns = self.get_table_columns(table_name)
+                    safe_columns = [
+                        f'"{col["name"]}"' if col["name"] in reserved_words else col["name"]
+                        for col in columns
+                    ]
+                    cols = ', '.join(safe_columns)
+                    query = f"SELECT {cols} FROM {table_name} LIMIT {sample_size}"
+                    return pd.read_sql(query, self.engine)
+                except Exception as e:
+                    print(f"Erro ao obter amostra da tabela {table_name}: {str(e)}")
+                    return pd.DataFrame()
+        
         try:
             query = f"SELECT * FROM {table_name} LIMIT {sample_size}"
             return pd.read_sql(query, self.engine)
-        except:
+        except Exception as e:
+            print(f"Erro ao obter amostra da tabela {table_name}: {str(e)}")
             return pd.DataFrame()
     
     def generate_rich_table_info(self, table_name: str) -> Dict[str, Any]:
-        """Gera informações detalhadas sobre uma tabela"""
-        columns = self.get_table_columns(table_name)
-        primary_keys = self.get_primary_keys(table_name)
-        foreign_keys = self.get_foreign_keys(table_name)
-        create_statement = self.get_table_create_statement(table_name)
-        indexes = self.get_table_indexes(table_name)
+        """Gera informações detalhadas sobre uma tabela com tratamento especial"""
+        table_info = {
+            "table_name": table_name,
+            "columns": self.get_table_columns(table_name),
+            "primary_keys": self.get_primary_keys(table_name),
+            "foreign_keys": self.get_foreign_keys(table_name),
+            "create_statement": self.get_table_create_statement(table_name)
+        }
         
-        # Opcional: adicionar amostra de dados
+        # Só adiciona índices se a tabela não estiver na lista de tabelas especiais
+        # ou se não tiver a flag skip_indexes
+        if not (table_name in SPECIAL_TABLES and SPECIAL_TABLES[table_name].get('skip_indexes', False)):
+            try:
+                table_info["indexes"] = self.get_table_indexes(table_name)
+            except Exception as e:
+                print(f"Erro ao obter índices da tabela {table_name}: {str(e)}")
+                table_info["indexes"] = []
+        else:
+            table_info["indexes"] = []
+        
+        # Tenta obter amostra de dados
         try:
             sample_data = self.get_table_sample_data(table_name)
-            sample_data_dict = sample_data.to_dict(orient='records')
-        except:
-            sample_data_dict = []
+            table_info["sample_data"] = sample_data.to_dict(orient='records') if not sample_data.empty else []
+        except Exception as e:
+            print(f"Erro ao obter amostra de dados da tabela {table_name}: {str(e)}")
+            table_info["sample_data"] = []
         
-        return {
-            "table_name": table_name,
-            "columns": columns,
-            "primary_keys": primary_keys,
-            "foreign_keys": foreign_keys,
-            "create_statement": create_statement,
-            "indexes": indexes,
-            "sample_data": sample_data_dict
-        }
+        return table_info
     
     def format_table_info_for_embedding(self, table_info: Dict[str, Any]) -> str:
-        """Formata informações da tabela para embedding"""
+        """Formata informações da tabela para embedding com tratamento para valores None"""
         table_name = table_info["table_name"]
         
         # Formata informações sobre colunas
         column_info = []
-        for col in table_info["columns"]:
-            is_pk = col["name"] in table_info["primary_keys"]
+        for col in table_info.get("columns", []):
+            if not isinstance(col, dict):
+                continue
+            is_pk = col.get("name") in table_info.get("primary_keys", [])
             pk_str = " (PRIMARY KEY)" if is_pk else ""
-            col_str = f"- {col['name']}: {col['type']}{pk_str}"
+            col_str = f"- {col.get('name', 'Unknown')}: {col.get('type', 'Unknown')}{pk_str}"
             column_info.append(col_str)
         
         # Formata informações sobre chaves estrangeiras
         fk_info = []
-        for fk in table_info["foreign_keys"]:
-            fk_cols = ", ".join(fk["constrained_columns"])
-            ref_cols = ", ".join(fk["referred_columns"])
-            fk_str = f"- Foreign Key: {fk_cols} -> {fk['referred_table']}.{ref_cols}"
-            fk_info.append(fk_str)
+        for fk in table_info.get("foreign_keys", []):
+            if not isinstance(fk, dict):
+                continue
+            fk_cols = ", ".join(fk.get("constrained_columns", []) or [])
+            ref_cols = ", ".join(fk.get("referred_columns", []) or [])
+            ref_table = fk.get("referred_table", "Unknown")
+            if fk_cols and ref_cols:
+                fk_str = f"- Foreign Key: {fk_cols} -> {ref_table}.{ref_cols}"
+                fk_info.append(fk_str)
         
-        # Informações sobre índices
+        # Informações sobre índices com tratamento para None
         index_info = []
-        for idx in table_info["indexes"]:
-            idx_cols = ", ".join(idx["column_names"])
-            idx_type = "UNIQUE " if idx["unique"] else ""
-            idx_str = f"- {idx_type}Index on ({idx_cols})"
-            index_info.append(idx_str)
+        for idx in table_info.get("indexes", []):
+            if not isinstance(idx, dict):
+                continue
+            
+            # Trata column_names None ou vazios
+            column_names = idx.get("column_names", [])
+            if column_names is None:
+                column_names = []
+            elif isinstance(column_names, str):
+                column_names = [column_names]
+            
+            # Filtra apenas nomes de colunas válidos
+            valid_columns = [str(col) for col in column_names if col is not None]
+            
+            if valid_columns:  # Só adiciona o índice se tiver colunas válidas
+                idx_cols = ", ".join(valid_columns)
+                idx_type = "UNIQUE " if idx.get("unique", False) else ""
+                idx_str = f"- {idx_type}Index on ({idx_cols})"
+                index_info.append(idx_str)
         
         # Amostra de dados (primeiras linhas)
         sample_data_str = ""
-        if table_info["sample_data"]:
+        sample_data = table_info.get("sample_data", [])
+        if sample_data:
             sample_data_str = "Exemplos de dados:\n"
-            for i, row in enumerate(table_info["sample_data"]):
-                sample_data_str += f"Exemplo {i+1}: {row}\n"
+            for i, row in enumerate(sample_data):
+                if isinstance(row, dict):
+                    sample_data_str += f"Exemplo {i+1}: {row}\n"
         
-        # Monta o documento final
+        # Monta o documento final com verificações de existência
         formatted_text = f"""
 TABLE: {table_name}
 
 CREATE STATEMENT:
-{table_info['create_statement']}
+{table_info.get('create_statement', '-- Create statement não disponível')}
 
 COLUMNS:
-{chr(10).join(column_info)}
+{chr(10).join(column_info) if column_info else '-- Nenhuma coluna encontrada'}
 
 FOREIGN KEYS:
-{chr(10).join(fk_info) if fk_info else "Nenhuma chave estrangeira"}
+{chr(10).join(fk_info) if fk_info else '-- Nenhuma chave estrangeira'}
 
 INDEXES:
-{chr(10).join(index_info) if index_info else "Nenhum índice definido"}
+{chr(10).join(index_info) if index_info else '-- Nenhum índice definido'}
 
 {sample_data_str}
 """
         return formatted_text
     
     def extract_all_tables_info(self) -> List[Document]:
-        """Extrai informações de todas as tabelas e formata para LangChain"""
+        """Extrai informações de todas as tabelas com melhor tratamento de erros"""
         tables = self.get_all_tables()
         documents = []
+        batch_size = 50
         
-        for table in tables:
-            print(f"Processando tabela: {table}")
-            table_info = self.generate_rich_table_info(table)
-            formatted_info = self.format_table_info_for_embedding(table_info)
+        # Move tabelas problemáticas para o final
+        tables = sorted(tables, key=lambda x: x in PROBLEMATIC_TABLES)
+        
+        for i in range(0, len(tables), batch_size):
+            batch_tables = tables[i:i+batch_size]
+            for table in batch_tables:
+                print(f"Processando tabela {i+len(documents)+1}/{len(tables)}: {table}")
+                
+                # Se é uma tabela para pular, cria um documento simplificado
+                if table in PROBLEMATIC_TABLES and PROBLEMATIC_TABLES[table].get('skip', False):
+                    simple_info = f"""
+                    TABLE: {table}
+                    NOTICE: Esta é uma tabela complexa que requer tratamento especial.
+                    Para consultas detalhadas desta tabela, por favor use queries SQL diretas.
+                    """
+                    doc = Document(
+                        page_content=simple_info,
+                        metadata={"table_name": table, "is_complex": True}
+                    )
+                    documents.append(doc)
+                    continue
+                
+                try:
+                    table_info = self.generate_rich_table_info(table)
+                    formatted_info = self.format_table_info_for_embedding(table_info)
+                    
+                    doc = Document(
+                        page_content=formatted_info,
+                        metadata={"table_name": table}
+                    )
+                    documents.append(doc)
+                except Exception as e:
+                    print(f"Erro ao processar tabela {table}: {str(e)}")
+                    continue
             
-            # Cria documento LangChain
-            doc = Document(
-                page_content=formatted_info,
-                metadata={"table_name": table}
-            )
-            documents.append(doc)
+            print(f"Completado lote de {len(batch_tables)} tabelas")
         
         return documents
 
@@ -247,73 +379,42 @@ class DVDRentalTextToSQL:
         self.query_callback_handler = SQLQueryCaptureCallback()
 
     def _get_or_create_schema_embeddings(self) -> Chroma:
-        """Carrega embeddings persistidos ou cria novos com detecção de mudanças"""
-        config = Config()
-    
-        # Verifica se o diretório do vector store existe e contém dados
-        vector_store_exists = os.path.exists(config.vector_store_dir) and len(os.listdir(config.vector_store_dir)) > 0
-    
-        #Arquivos para controle do schema
-        schema_hash_file = os.path.join(config.data_dir, "schema_hash.txt")
-        processed_flag = os.path.join(config.data_dir, "schema_processed.flag")
-    
-        # Gera um hash do schema atual (tabelas e estrutura)
-        current_schema_hash = self._generate_schema_hash()
-    
-        # Verifica se o schema mudou desde o último processamento
-        schema_changed = True
-        if os.path.exists(schema_hash_file):
-            with open(schema_hash_file, "r") as f:
-                stored_hash = f.read().strip()
-                schema_changed = stored_hash != current_schema_hash
-    
-        # Se o checkpoint existe e o schema não mudou, carrega do disco
-        if (self.use_checkpoint and vector_store_exists and os.path.exists(processed_flag) 
-                and not schema_changed and not self.force_reprocess):
-            print("Carregando schema do vector store persistido...")
-            # Carrega o vector store do disco
-            vector_store = Chroma(
-                persist_directory=config.vector_store_dir,
-                embedding_function=self.embeddings
+        """Cria ou recupera embeddings do schema do banco"""
+        schema_hash = self._generate_schema_hash()
+        checkpoint_dir = f"checkpoints/schema_{schema_hash}"
+        
+        # Cria o diretório de checkpoint se não existir
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        # Inicializa o client do Chroma
+        embedding_function = OpenAIEmbeddings()
+        
+        if os.path.exists(os.path.join(checkpoint_dir, "chroma.sqlite3")) and not self.force_reprocess:
+            print("Carregando embeddings do checkpoint...")
+            return Chroma(
+                persist_directory=checkpoint_dir,
+                embedding_function=embedding_function
             )
-            return vector_store
-    
-        # Se chegou aqui, precisa processar o schema novamente
-        reason = ""
-        if not vector_store_exists:
-            reason = "vector store não existe"
-        elif not os.path.exists(processed_flag):
-            reason = "flag de processamento não encontrada"
-        elif schema_changed:
-            reason = "schema do banco foi modificado"
-        elif self.force_reprocess:
-            reason = "reprocessamento forçado"
-    
-        print(f"Extraindo schema do banco de dados... ({reason})")
-        documents = self.schema_extractor.extract_all_tables_info()
-    
-        # Limpa o diretório do vector store se já existir
-        if vector_store_exists:
-            import shutil
-            shutil.rmtree(config.vector_store_dir)
-            os.makedirs(config.vector_store_dir, exist_ok=True)
-    
-        # Cria vector store e persiste no disco
-        vector_store = Chroma.from_documents(
-            documents=documents,
-            embedding=self.embeddings,
-            persist_directory=config.vector_store_dir
+        
+        print("Gerando novos embeddings do schema...")
+        extractor = SchemaExtractor(self.db_uri)
+        documents = extractor.extract_all_tables_info()
+        
+        # Cria nova instância do Chroma
+        vectorstore = Chroma(
+            persist_directory=checkpoint_dir,
+            embedding_function=embedding_function
         )
-    
-        # Salva o hash do schema atual
-        with open(schema_hash_file, "w") as f:
-            f.write(current_schema_hash)
-    
-        # Cria arquivo de flag indicando que o schema foi processado
-        with open(processed_flag, "w") as f:
-            f.write("Schema processed successfully")
-    
-        return vector_store
+        
+        # Adiciona documentos em lotes
+        batch_size = 50
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i:i+batch_size]
+            vectorstore.add_documents(batch)
+            # O Chroma mais recente persiste automaticamente quando persist_directory é fornecido
+            print(f"Adicionado lote de embeddings {i+1}/{len(documents)}")
+        
+        return vectorstore
 
     def _generate_schema_hash(self) -> str:
         """Gera um hash representando o estado atual do schema"""
