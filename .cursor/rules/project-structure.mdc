@@ -1,0 +1,41 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# SQL Agent App - Estrutura e Docker
+
+Este projeto é uma aplicação Streamlit que converte linguagem natural em SQL.
+
+## Arquivos Principais
+- **Ponto de Entrada:** [app.py](mdc:LangChain/sql-agent-app/app.py) inicializa o Streamlit.
+- **Lógica do Agente:** [modules/sql_agent.py](mdc:LangChain/sql-agent-app/modules/sql_agent.py) contém a implementação do agente SQL com LangChain.
+- **Configuração:** [modules/config.py](mdc:LangChain/sql-agent-app/modules/config.py) lida com configurações, incluindo a URI do banco de dados.
+- **Dependências:** [requirements.txt](mdc:LangChain/sql-agent-app/requirements.txt) lista as bibliotecas Python necessárias.
+- **Dados Persistentes:** O diretório [data/](mdc:LangChain/sql-agent-app/data) armazena checkpoints e o vector store.
+- **Configuração de Ambiente:** Variáveis (como chaves de API e conexão com DB) são lidas de um arquivo `.env` na raiz.
+
+## Dockerização
+O projeto é dockerizado para facilitar o deploy e a execução em diferentes ambientes.
+
+- **Imagem da Aplicação:** Definida em [Dockerfile](mdc:LangChain/sql-agent-app/Dockerfile). Copia o código e instala dependências.
+- **Desenvolvimento:** Use [docker-compose.yml](mdc:LangChain/sql-agent-app/docker-compose.yml). Ele monta o código local como volume para permitir hot-reloading.
+  ```bash
+  docker-compose -f docker-compose.yml up --build
+  ```
+- **Produção/Distribuição:** Use [docker-compose.prod.yml](mdc:LangChain/sql-agent-app/docker-compose.prod.yml). Ele roda a aplicação a partir da imagem buildada, sem montar volumes de código local, tornando-a autossuficiente. Requer um arquivo `.env`.
+  ```bash
+  # Buildar a imagem (opcional, o compose pode fazer)
+  # docker build -t sql-agent-app:latest .
+  # Rodar
+  docker-compose -f docker-compose.prod.yml up --build # --build apenas na primeira vez ou se o código mudar
+  ```
+- **Banco de Dados:** Ambos os compose files definem um serviço `db` usando a imagem `pgvector/pgvector`, persistindo dados em um volume Docker (`pgdata` ou `pgdata-prod`).
+
+> Para modificar ou adicionar regras, crie arquivos `.mdc` em `.cursor/rules` e utilize referências de arquivos conforme o exemplo acima.
+
+
+
+
+
+
