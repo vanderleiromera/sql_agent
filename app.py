@@ -2,7 +2,7 @@
 import streamlit as st
 import os
 from dotenv import load_dotenv
-from modules.sql_agent import DVDRentalTextToSQL
+from modules.sql_agent import OdooTextToSQL
 from modules.config import Config
 import pandas as pd
 import json
@@ -16,7 +16,7 @@ load_dotenv()
 
 # Configuração da página Streamlit
 st.set_page_config(
-    page_title="DVD Rental SQL Agent",
+    page_title="Odoo ERP SQL Agent",
     page_icon="🔍",
     layout="wide"
 )
@@ -25,11 +25,11 @@ st.set_page_config(
 def initialize_sql_agent(force_reprocess=False):
     """Inicializa o agente SQL (cache para não reinicializar a cada interação)"""
     config = Config()
-    return DVDRentalTextToSQL(config.db_uri, use_checkpoint=True, force_reprocess=force_reprocess)
+    return OdooTextToSQL(config.db_uri, use_checkpoint=True, force_reprocess=force_reprocess)
 
 def main():
-    st.title("🤖 Agente SQL para Consulta de Locadora DVD")
-    st.write("Faça perguntas em linguagem natural sobre os dados da locadora.")
+    st.title("🤖 Agente SQL para Consulta de Odoo ERP")
+    st.write("Faça perguntas em linguagem natural sobre os dados de Odoo ERP.")
     
     # Sidebar com informações
     with st.sidebar:
@@ -70,15 +70,15 @@ def main():
             "O que você gostaria de saber?",
             value=st.session_state.question,  # Vincula ao session_state
             height=100,
-            placeholder="Ex: Quais são os 5 clientes que mais alugaram filmes?",
+            placeholder="Ex: Qual total de vendas do ultimo 3 meses?",
             key="user_question_area" # Adiciona uma chave para estabilidade
         )
         # Atualiza o session_state se o usuário digitar manualmente
         st.session_state.question = user_question_input
         
         examples = [
-            "Quais são os 5 filmes mais alugados?",
-            "Qual a receita total por categoria de filme?",
+            "Qual produto mais vendido em março, 2025? filte em sale_order e product_product, valor e nome",
+            "Total de vendas produtos default code '1290' em valor no ano de 2024?",
             "Quais clientes estão com pagamentos em atraso?"
         ]
         
