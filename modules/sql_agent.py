@@ -175,7 +175,7 @@ class SchemaExtractor:
         
         # Algumas tabelas de configuração são importantes
         if category == "configuration" and any(important in table_name 
-            for important in ["company", "partner", "product"]):
+                                            for important in ["company", "partner", "product"]):
             return True
         
         # Tabelas técnicas, logs e outras são menos importantes
@@ -265,7 +265,34 @@ class SchemaExtractor:
         except Exception as e:
             print(f"Erro ao obter índices da tabela {table_name}: {str(e)}")
             return []
+        
+    def _json_serializable_converter(self, obj):
+        """Converte tipos não serializáveis para formatos compatíveis com JSON"""
+        import pandas as pd
+        import numpy as np
+        from datetime import datetime, date
     
+        # Converte tipos de data/hora
+        if isinstance(obj, (pd.Timestamp, datetime, date)):
+            return obj.isoformat()
+        # Converte tipos numpy
+        elif isinstance(obj, (np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64,
+                            np.uint8, np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        # Converte decimal
+        elif hasattr(obj, 'to_eng_string'):  # Para objetos Decimal
+            return str(obj)
+        # Outros tipos não serializáveis diretamente
+        else:
+            return str(obj)
+
+
     def get_table_sample_data(self, table_name: str, sample_size: int = 3) -> pd.DataFrame:
         """Retorna amostra de dados de uma tabela com tratamento para palavras reservadas"""
         # Verifica se devemos incluir amostras para esta tabela
@@ -308,18 +335,24 @@ class SchemaExtractor:
             "module": self._infer_odoo_module(table_name),
             "indexes": self.get_table_indexes(table_name)
         }
-        
+
         # Adiciona amostra de dados apenas para tabelas relevantes
         if self._should_include_sample_data(table_name):
             try:
                 sample_data = self.get_table_sample_data(table_name)
-                table_info["sample_data"] = sample_data.to_dict(orient='records') if not sample_data.empty else []
+                # Use o conversor personalizado ao transformar em dicionários
+                if not sample_data.empty:
+                    records = sample_data.to_dict(orient='records')
+                    # Serialize cada registro com o conversor personalizado
+                    table_info["sample_data"] = json.loads(json.dumps(records, default=self._json_serializable_converter))
+                else:
+                    table_info["sample_data"] = []
             except Exception as e:
                 print(f"Erro ao obter amostra de dados da tabela {table_name}: {str(e)}")
                 table_info["sample_data"] = []
         else:
             table_info["sample_data"] = []
-        
+
         return table_info
     
     def format_table_info_for_embedding(self, table_info: Dict[str, Any]) -> str:
@@ -541,26 +574,29 @@ RELATIONSHIPS:
             }
         )
     
+    # Em seguida, modifique a função extract_table_data_document para usar o conversor:
+
     def extract_table_data_document(self, table_name: str, sample_size: int = 3) -> Optional[Document]:
         """Extrai documento apenas com amostras de dados da tabela"""
         # Verifica se devemos incluir amostras para esta tabela
         if not self._should_include_sample_data(table_name):
             return None
-        
+    
         try:
             sample_data = self.get_table_sample_data(table_name, sample_size)
             if sample_data.empty:
                 return None
-            
+        
+            # Converte o DataFrame para dict e então para JSON usando o conversor personalizado
             records = sample_data.to_dict(orient='records')
-            
+        
             # Formata o conteúdo
             content = f"""
 TABLE DATA SAMPLES: {table_name}
 
-{chr(10).join([f"Row {i+1}: {json.dumps(row)}" for i, row in enumerate(records)])}
+{chr(10).join([f"Row {i+1}: {json.dumps(row, default=self._json_serializable_converter)}" for i, row in enumerate(records)])}
 """
-            
+        
             return Document(
                 page_content=content,
                 metadata={
