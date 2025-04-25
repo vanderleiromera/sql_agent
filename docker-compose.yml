@@ -23,7 +23,7 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - ./data:/app/data
+      - sql_agent_data:/app/data
     env_file:
       - .env
     stdin_open: true
@@ -31,4 +31,4 @@ services:
 
 volumes:
   pgdata:
-  data:
+  sql_agent_data:

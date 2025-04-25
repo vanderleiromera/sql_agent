@@ -20,6 +20,9 @@ from langchain.callbacks.base import BaseCallbackHandler
 # --- Importa o prompt do arquivo prompts.py ---
 from .prompts import SAFETY_PREFIX
 import time
+from langchain_community.cache import SQLAlchemyCache
+from langchain.globals import set_llm_cache
+import datetime
 
 # Constantes e configurações
 ODOO_COMPLEX_TABLES = {
@@ -723,18 +726,44 @@ class SQLQueryCaptureCallback(BaseCallbackHandler):
 class OdooTextToSQL:
     """Classe principal otimizada para processamento de consultas text-to-SQL em bancos Odoo"""
     
-    def __init__(self, db_uri: str, use_checkpoint: bool = True, force_reprocess: bool = False):
+    def __init__(self, db_uri: str, use_checkpoint: bool = True, force_reprocess: bool = False, 
+                data_dir: Optional[str] = None, enable_llm_cache: bool = True):
         config = Config()
         self.db_uri = db_uri
         self.use_checkpoint = use_checkpoint
         self.force_reprocess = force_reprocess
+        
+        # Configuração do diretório de dados
+        self.data_dir = data_dir or os.environ.get('SQL_AGENT_DATA_DIR', 'data')
+        # Cria o diretório base se não existir
+        os.makedirs(self.data_dir, exist_ok=True)
+        
         self.schema_extractor = SchemaExtractor(db_uri)
         self.embeddings = OpenAIEmbeddings(api_key=config.openai_api_key)
+
+        # Configuração do cache SQLAlchemy para o LLM
+        if enable_llm_cache:
+            try:
+                # Cria um engine SQLite para o cache no diretório de dados
+                cache_path = os.path.join(self.data_dir, 'llm_cache.sqlite')
+                cache_engine = create_engine(f"sqlite:///{cache_path}")
+                
+                # Configura o SQLAlchemyCache apenas com o engine
+                self.llm_cache = SQLAlchemyCache(cache_engine)
+                
+                # Configura o cache global para LangChain
+                set_llm_cache(self.llm_cache)
+                print(f"Cache LLM SQLite configurado em: {cache_path}")
+            except Exception as e:
+                print(f"Erro ao configurar cache LLM: {str(e)}")
+
+        # Inicialização do LLM
         self.llm = ChatOpenAI(
             temperature=0,
             model_name=config.model_name,
             api_key=config.openai_api_key
         )
+        
         self.db = SQLDatabase.from_uri(db_uri)
         self.vector_store = self._get_or_create_schema_embeddings()
         self.toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
@@ -754,46 +783,54 @@ class OdooTextToSQL:
 
     def _get_or_create_schema_embeddings(self) -> Chroma:
         """Cria ou recupera embeddings do schema do banco com estratégia otimizada"""
-        schema_hash = self._generate_schema_hash()
-        checkpoint_dir = f"checkpoints/schema_{schema_hash}"
-        
-        # Cria o diretório de checkpoint se não existir
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        
-        # Inicializa o client do Chroma
-        embedding_function = self.embeddings
-        
-        if os.path.exists(os.path.join(checkpoint_dir, "chroma.sqlite3")) and not self.force_reprocess:
-            print("Carregando embeddings do checkpoint...")
-            return Chroma(
+        try:
+            schema_hash = self._generate_schema_hash()
+            checkpoint_dir = os.path.join(self.data_dir, 'checkpoints', f"schema_{schema_hash}")
+            
+            # Cria o diretório de checkpoint se não existir
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            
+            # Inicializa o client do Chroma
+            embedding_function = self.embeddings
+            
+            if os.path.exists(os.path.join(checkpoint_dir, "chroma.sqlite3")) and not self.force_reprocess:
+                print(f"Carregando embeddings do checkpoint: {checkpoint_dir}")
+                return Chroma(
+                    persist_directory=checkpoint_dir,
+                    embedding_function=embedding_function
+                )
+            
+            print(f"Gerando novos embeddings do schema em: {checkpoint_dir}")
+            documents = self.schema_extractor.extract_all_tables_info()
+            
+            print(f"Total de documentos a serem incorporados: {len(documents)}")
+            
+            # Cria nova instância do Chroma
+            vectorstore = Chroma(
                 persist_directory=checkpoint_dir,
                 embedding_function=embedding_function
             )
-        
-        print("Gerando novos embeddings do schema...")
-        documents = self.schema_extractor.extract_all_tables_info()
-        
-        print(f"Total de documentos a serem incorporados: {len(documents)}")
-        
-        # Cria nova instância do Chroma
-        vectorstore = Chroma(
-            persist_directory=checkpoint_dir,
-            embedding_function=embedding_function
-        )
-        
-        # Adiciona documentos em lotes para melhor performance e feedback
-        batch_size = 50
-        for i in range(0, len(documents), batch_size):
-            batch = documents[i:i+batch_size]
-            ids = [f"doc_{i+j}" for j in range(len(batch))]
             
-            # Adiciona o lote com IDs explícitos
-            vectorstore.add_documents(documents=batch, ids=ids)
+            # Adiciona documentos em lotes para melhor performance e feedback
+            batch_size = 50
+            for i in range(0, len(documents), batch_size):
+                batch = documents[i:i+batch_size]
+                ids = [f"doc_{i+j}" for j in range(len(batch))]
+                
+                # Adiciona o lote com IDs explícitos
+                vectorstore.add_documents(documents=batch, ids=ids)
+                
+                print(f"Processado lote {i//batch_size + 1}/{(len(documents)-1)//batch_size + 1} ({i+len(batch)}/{len(documents)} documentos)")
             
-            print(f"Processado lote {i//batch_size + 1}/{(len(documents)-1)//batch_size + 1} ({i+len(batch)}/{len(documents)} documentos)")
-        
-        print("Embeddings do schema concluídos e salvos.")
-        return vectorstore
+            print("Embeddings do schema concluídos e salvos.")
+            return vectorstore
+        except Exception as e:
+            print(f"Erro ao criar embeddings: {str(e)}")
+            # Fallback para diretório temporário em caso de erro
+            fallback_dir = os.path.join(self.data_dir, 'checkpoints', 'fallback')
+            os.makedirs(fallback_dir, exist_ok=True)
+            print(f"Usando diretório de fallback: {fallback_dir}")
+            return Chroma(persist_directory=fallback_dir, embedding_function=self.embeddings)
 
     def _generate_schema_hash(self) -> str:
         """Gera um hash representando o estado atual do schema com foco nas tabelas principais"""

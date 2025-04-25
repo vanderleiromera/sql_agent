@@ -27,5 +27,7 @@ EXPOSE 8501
 # Define a variável de ambiente para o Streamlit não abrir o navegador
 ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
+ENV SQL_AGENT_DATA_DIR=/app/data
+
 # Comando para rodar a aplicação
 CMD ["streamlit", "run", "app.py"]

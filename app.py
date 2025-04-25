@@ -77,9 +77,9 @@ def main():
         st.session_state.question = user_question_input
         
         examples = [
-            "Qual produto mais vendido em março, 2025? filte em sale_order e product_product, valor e nome",
-            "Total de vendas produtos default code '1290' em valor no ano de 2024?",
-            "Quais clientes estão com pagamentos em atraso?"
+            "Qual produto mais vendido em março, 2025? valor e nome",
+            "Total de vendas em 2024, mês a mês?",
+            "Liste os 10 produtos mais vendidos, em ordem de valor?"
         ]
         
         st.write("Ou tente um exemplo:")
