@@ -145,7 +145,9 @@ def main():
                 final_answer = str(result_data)
 
             # Tenta exibir o resultado final (geralmente texto interpretado)
-            st.write(final_answer)
+            # print(f"DEBUG: final_answer type = {type(final_answer)}") # Remover log
+            # print(f"DEBUG: final_answer repr = {repr(final_answer)}") # Remover log
+            st.text(final_answer)  # Usar st.text para preservar quebras de linha
 
             # Opcional: Exibir tabelas relevantes se armazenadas
             # if "tables" in st.session_state and st.session_state.tables:
