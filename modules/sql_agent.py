@@ -18,11 +18,14 @@ from .config import Config
 # Importações adicionadas para Callbacks
 from langchain.callbacks.base import BaseCallbackHandler
 # --- Importa o prompt do arquivo prompts.py ---
-from .prompts import SAFETY_PREFIX
+from .prompts import SAFETY_PREFIX, ODODO_FEW_SHOT_PROMPT
 import time
 from langchain_community.cache import SQLAlchemyCache
 from langchain.globals import set_llm_cache
 import datetime
+from langchain.chains import create_sql_query_chain
+from langchain_core.prompts import PromptTemplate
+import re
 
 # Constantes e configurações
 ODOO_COMPLEX_TABLES = {
@@ -768,14 +771,19 @@ class OdooTextToSQL:
         self.vector_store = self._get_or_create_schema_embeddings()
         self.toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
 
-        # --- Usa o prefixo importado ---
-        self.agent = create_sql_agent(
-            llm=self.llm,
-            toolkit=self.toolkit,
-            verbose=True,
-            agent_type="openai-tools",
-            prefix=SAFETY_PREFIX  # Usa a constante importada
-        )
+        # ADICIONE a criação da cadeia SQL usando o prompt dinâmico:
+        if ODODO_FEW_SHOT_PROMPT:
+            print("INFO: Inicializando cadeia SQL com prompt dinâmico few-shot.")
+            self.chain = create_sql_query_chain(self.llm, self.db, prompt=ODODO_FEW_SHOT_PROMPT)
+            self.prompt_used = ODODO_FEW_SHOT_PROMPT # Guarda para referência, se necessário
+        else:
+            print("AVISO: Prompt dinâmico não disponível. Inicializando cadeia SQL com prompt padrão.")
+            # Cria um prompt padrão simples incluindo o SAFETY_PREFIX
+            DEFAULT_PROMPT_STR = f"{SAFETY_PREFIX}\n\nInstruções: Gere uma consulta SQL SELECT para responder à pergunta baseado nas tabelas abaixo.\n\nTabelas:\n{{table_info}}\n\nPergunta: {{input}}\nConsulta SQL:"
+            DEFAULT_PROMPT = PromptTemplate.from_template(DEFAULT_PROMPT_STR)
+            self.chain = create_sql_query_chain(self.llm, self.db, prompt=DEFAULT_PROMPT)
+            self.prompt_used = DEFAULT_PROMPT # Guarda para referência
+
         # Instancia o callback handler
         self.query_callback_handler = SQLQueryCaptureCallback()
         # Cache para resultados de consultas
@@ -966,91 +974,9 @@ class OdooTextToSQL:
             if data_doc:
                 sample_data_info.append(data_doc.page_content)
         
-        # Determina se é um banco Odoo para adicionar contexto específico
-        odoo_context = ""
-        if self.schema_extractor.is_odoo:
-            odoo_context = """
-            Este é um banco de dados Odoo. Algumas dicas específicas para consultas Odoo:
-            - Tabelas res_partner contêm dados de parceiros/clientes
-            - Tabelas com prefixo account_ são relacionadas à contabilidade
-            - Tabelas com prefixo sale_ são relacionadas a vendas
-            - Tabelas com prefixo purchase_ são relacionadas a compras
-            - Tabelas com prefixo stock_ são relacionadas ao estoque
-            - Muitas tabelas usam campos 'active' para filtrar registros ativos (active=true)
-            - Campos como create_date, write_date são comuns para auditoria
-
-            Estrutura de produtos no Odoo:
-            - product_template: contém informações básicas do produto como nome (name), descrição, etc.
-            - product_product: representa variantes específicas de produtos e se relaciona com product_template através do campo product_tmpl_id
-            - Para consultar o nome de produtos em sale_order_line, deve-se fazer JOIN entre sale_order_line, product_product e product_template
-
-            Estrutura de vendas no Odoo:
-            - sale_order: cabeçalho da venda com data (date_order), cliente (partner_id), etc.
-            - sale_order_line: itens da venda com produto (product_id -> product_product), quantidade (product_uom_qty), valor unitário (price_unit), subtotal (price_subtotal)
-
-            Estrutura de estoque no Odoo:
-            - stock_warehouse: define os armazéns na empresa
-            - stock_location: define localizações hierárquicas dentro dos armazéns (tipo=internal) e também localizações virtuais (clientes, fornecedores)
-            - stock_move: registra movimentações de produtos entre localizações, com campos como product_id, product_uom_qty, location_id (origem), location_dest_id (destino)
-            - stock_quant: registra a quantidade atual de cada produto em cada localização
-            - stock_picking: representa transferências/remessas com um ou mais produtos
-            - stock_picking_type: define tipos de operações de estoque (recebimento, entrega, transferência interna)
-            - stock_inventory: usado para inventários físicos e ajustes de estoque
-
-            Estrutura de compras no Odoo:
-            - purchase_order: cabeçalho do pedido de compra com data (date_order), fornecedor (partner_id), moeda (currency_id), etc.
-            - purchase_order_line: itens da compra com produto (product_id), quantidade (product_qty), preço unitário (price_unit), subtotal (price_subtotal)
-            - purchase_requisition: requisição de compra (licitação) que pode gerar vários pedidos de compra
-            - res_partner: para fornecedores, o campo supplier_rank indica a relevância como fornecedor
-            - product_supplierinfo: contém informações específicas de fornecedores para produtos (preços, códigos de referência, tempo de entrega)
-            - purchase_report: visão analítica das compras para relatórios
-
-            Fluxo de aprovação de compras:
-            - purchase_order.state: estados do pedido ('draft', 'sent', 'to approve', 'purchase', 'done', 'cancel')
-            - purchase_order.approval_required: indica se o pedido precisa ser aprovado
-            - purchase_order.user_id: usuário responsável pela compra
-            - purchase_order.notes: notas internas da compra
-            - purchase_order.date_planned: data planejada para recebimento
-
-            Acordos com fornecedores:
-            - purchase_order.origin: referência à origem do pedido (pode ser outro documento)
-            - purchase_order.date_approve: data de aprovação da compra
-            - purchase_order.fiscal_position_id: posição fiscal aplicada à compra
-            - purchase_order.payment_term_id: condições de pagamento acordadas
-
-            Estrutura de faturas no Odoo:
-            - account_move: representa documentos contábeis incluindo faturas (invoice), pagamentos, lançamentos, etc.
-            - O campo 'move_type' indica o tipo: 'out_invoice' (fatura de cliente), 'in_invoice' (fatura de fornecedor), 'out_refund' (devolução de cliente), 'in_refund' (devolução a fornecedor)
-            - O campo 'state' indica o status: 'draft', 'posted', 'cancel', etc.
-            - account_move_line: linhas dos lançamentos contábeis/faturas com produto, conta contábil, valores, etc.
-            - account_payment: registra pagamentos de clientes e a fornecedores
-            - account_journal: define os diários contábeis (vendas, compras, banco, caixa)
-
-            Rastreabilidade de produtos:
-            - stock_production_lot: define lotes/números de série para produtos rastreáveis
-            - stock_move_line: detalha as movimentações com informações de lote/série através do campo lot_id
-
-            Relacionamentos importantes entre módulos:
-            - sale_order -> stock_picking: vendas geram remessas/entregas
-            - stock_picking -> account_move: entregas podem gerar faturas
-            - purchase_order -> stock_picking: compras geram recebimentos
-            - purchase_order -> account_move: compras geram faturas de fornecedor
-            - stock_picking -> stock_move: cada transferência tem uma ou mais movimentações de produtos
-            - account_move -> purchase_order: faturas podem ser vinculadas a pedidos de compra via invoice_origin
-            - purchase_order_line -> account_move_line: linhas de compra são vinculadas às linhas da fatura
-
-            Campos de estado comuns:
-            - sale_order.state: 'draft', 'sent', 'sale', 'done', 'cancel'
-            - purchase_order.state: 'draft', 'sent', 'to approve', 'purchase', 'done', 'cancel'
-            - stock_picking.state: 'draft', 'waiting', 'confirmed', 'assigned', 'done', 'cancel'
-            - account_move.state: 'draft', 'posted', 'cancel'
-            """
-        
         # Cria prompt enriquecido
         enhanced_query = f"""
 Pergunta: {query}
-
-{odoo_context}
 
 Tabelas relevantes para esta consulta:
 
@@ -1107,8 +1033,8 @@ Inclua aliases de tabela para melhorar a legibilidade.
         start_time = time.time()
         
         # Executa o agente passando o callback handler
-        result = self.agent.invoke(
-            {"input": enhanced_question},
+        result = self.chain.invoke(
+            {"question": enhanced_question},
             config={"callbacks": [self.query_callback_handler]} # Passa o handler aqui
         )
         
@@ -1128,3 +1054,55 @@ Inclua aliases de tabela para melhorar a legibilidade.
         
         # Retorna tanto o resultado quanto a query capturada
         return result, captured_query            
+
+    async def ask_agent(self, question: str) -> dict:
+        """
+        Recebe uma pergunta, gera a consulta SQL usando a cadeia,
+        executa a consulta usando o toolkit e retorna a resposta.
+        """
+        self.logger.info(f"Recebida pergunta para o agente SQL: {question}")
+        if not self.chain:
+            self.logger.error("Erro: Cadeia SQL não inicializada.")
+            return {"error": "Cadeia SQL não inicializada corretamente."}
+
+        try:
+            # 1. Gerar a consulta SQL usando a cadeia e a pergunta original
+            self.logger.info(f"Enviando pergunta para a cadeia SQL: '{question}'")
+            # O 'top_k' e 'table_info' são gerenciados internamente pelo create_sql_query_chain
+            # passando a 'question' como 'input' para o prompt.
+            sql_query = await self.chain.ainvoke({"question": question})
+            self.logger.info(f"Consulta SQL gerada: {sql_query}")
+
+            # Validação básica da query gerada (apenas SELECT)
+            if not isinstance(sql_query, str) or not sql_query.strip().upper().startswith("SELECT"):
+                 self.logger.warning(f"Consulta gerada não é um SELECT válido: {sql_query}")
+                 # Tenta extrair a query se estiver dentro de um bloco de código ou texto
+                 match = re.search(r"```(?:sql)?\s*(SELECT.*?;?)\s*```", sql_query, re.DOTALL | re.IGNORECASE)
+                 if match:
+                     sql_query = match.group(1).strip()
+                     self.logger.info(f"Consulta SELECT extraída: {sql_query}")
+                     if not sql_query.upper().startswith("SELECT"):
+                          raise ValueError("A consulta extraída ainda não é um SELECT válido.")
+                 else:
+                     raise ValueError(f"A consulta gerada não é um SELECT válido e não foi possível extrair: {sql_query}")
+
+
+            # 2. Executar a consulta SQL usando a ferramenta do toolkit
+            query_execution_tool = next((t for t in self.toolkit.get_tools() if t.name == "sql_db_query"), None)
+
+            if not query_execution_tool:
+                self.logger.error("Erro: Ferramenta 'sql_db_query' não encontrada no toolkit.")
+                return {"error": "Erro interno: Ferramenta de execução de SQL não encontrada."}
+
+            self.logger.info(f"Executando a consulta SQL...")
+            # A ferramenta sql_db_query espera a consulta SQL como argumento
+            final_answer = await query_execution_tool.arun(sql_query)
+            self.logger.info(f"Resposta recebida do banco de dados.") # Não logar a resposta diretamente por segurança/privacidade
+
+            return {"answer": final_answer, "generated_query": sql_query}
+
+
+        except Exception as e:
+            self.logger.error(f"Erro durante a execução em ask_agent: {e}", exc_info=True) # Log com traceback
+            # Considerar retornar mensagens de erro mais amigáveis ao usuário final
+            return {"error": f"Ocorreu um erro ao processar sua pergunta. Detalhes: {e}"}            
