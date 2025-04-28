@@ -1,5 +1,5 @@
 # arquivo: modules/sql_agent.py
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 # Importações corrigidas:
 from langchain_community.agent_toolkits.sql.base import create_sql_agent
@@ -250,7 +250,7 @@ class SchemaExtractor:
         try:
             # Carrega a tabela no metadata
             table = self.metadata.tables.get(table_name)
-            if table is None:
+            if (table is None):
                 table = self.metadata.reflect(self.engine, only=[table_name])
                 table = self.metadata.tables.get(table_name)
             
@@ -730,7 +730,7 @@ class OdooTextToSQL:
     """Classe principal otimizada para processamento de consultas text-to-SQL em bancos Odoo"""
     
     def __init__(self, db_uri: str, use_checkpoint: bool = True, force_reprocess: bool = False, 
-                 data_dir: Optional[str] = None, enable_llm_cache: bool = True):
+                data_dir: Optional[str] = None, enable_llm_cache: bool = True):
         config = Config()
         self.db_uri = db_uri
         self.use_checkpoint = use_checkpoint
@@ -774,18 +774,27 @@ class OdooTextToSQL:
         self.vector_store = self._get_or_create_schema_embeddings()
         self.toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
 
-        # ADICIONE a criação da cadeia SQL usando o prompt dinâmico:
+        # MODIFIQUE a criação da cadeia SQL para usar tanto o prompt dinâmico quanto as informações das tabelas:
         if ODODO_FEW_SHOT_PROMPT:
             print("INFO: Inicializando cadeia SQL com prompt dinâmico few-shot.")
-            self.chain = create_sql_query_chain(self.llm, self.db, prompt=ODODO_FEW_SHOT_PROMPT)
-            self.prompt_used = ODODO_FEW_SHOT_PROMPT # Guarda para referência, se necessário
+            self.chain = create_sql_query_chain(
+                llm=self.llm,
+                db=self.db,
+                prompt=ODODO_FEW_SHOT_PROMPT
+            )
+            self.prompt_used = ODODO_FEW_SHOT_PROMPT
         else:
             print("AVISO: Prompt dinâmico não disponível. Inicializando cadeia SQL com prompt padrão.")
-            # Cria um prompt padrão simples incluindo o SAFETY_PREFIX
-            DEFAULT_PROMPT_STR = f"{SAFETY_PREFIX}\n\nInstruções: Gere uma consulta SQL SELECT para responder à pergunta baseado nas tabelas abaixo.\n\nTabelas:\n{{table_info}}\n\nPergunta: {{input}}\nConsulta SQL:"
-            DEFAULT_PROMPT = PromptTemplate.from_template(DEFAULT_PROMPT_STR)
-            self.chain = create_sql_query_chain(self.llm, self.db, prompt=DEFAULT_PROMPT)
-            self.prompt_used = DEFAULT_PROMPT # Guarda para referência
+            DEFAULT_PROMPT = PromptTemplate(
+                template=f"{SAFETY_PREFIX}\n\nInstruções: Gere uma consulta SQL SELECT para responder à pergunta baseado nas tabelas abaixo.\n\nTabelas:\n{{table_info}}\n\nPergunta: {{input}}\nConsulta SQL:",
+                input_variables=["table_info", "input"]
+            )
+            self.chain = create_sql_query_chain(
+                llm=self.llm,
+                db=self.db,
+                prompt=DEFAULT_PROMPT
+            )
+            self.prompt_used = DEFAULT_PROMPT
 
         # Instancia o callback handler
         self.query_callback_handler = SQLQueryCaptureCallback()
@@ -977,16 +986,16 @@ class OdooTextToSQL:
     def query(self, user_question: str, top_k_results: int = 5) -> Tuple[Dict[str, Any], Optional[str]]:
         """
         Processa pergunta do usuário, encontra tabelas, formata informações,
-        invoca a cadeia SQL com os inputs corretos, captura a query SQL via callback,
-        e retorna o resultado e a query capturada.
+        invoca a cadeia SQL com os inputs corretos.
         """
         cached_data = self.get_query_from_cache(user_question)
-        if cached_data:
+        if (cached_data):
             print("INFO: Usando resultado em cache.")
             return cached_data['result'], cached_data['query']
 
         self.query_callback_handler.reset()
 
+        # Encontra tabelas relevantes e gera string de informações
         relevant_tables = self.find_relevant_tables(user_question)
         if not relevant_tables:
             print("AVISO: Nenhuma tabela relevante encontrada. A consulta pode falhar.")
@@ -995,21 +1004,17 @@ class OdooTextToSQL:
             print(f"INFO: Tabelas relevantes encontradas: {', '.join(relevant_tables)}")
             table_info_str = self._generate_table_info_string(relevant_tables)
 
+        # Prepara o input para a cadeia com todas as chaves necessárias
         chain_input = {
-            "question": user_question,
             "input": user_question,
-            "top_k": top_k_results,
             "table_info": table_info_str
         }
 
         start_time = time.time()
 
         try:
-            # A cadeia agora recebe 'question', 'input', 'top_k', e 'table_info'
-            result = self.chain.invoke(
-                chain_input,
-                config={"callbacks": [self.query_callback_handler]}
-            )
+            # Invoca a cadeia com o callback para capturar a query
+            result = self.chain.invoke({"question": user_question})
 
             exec_time = time.time() - start_time
             print(f"INFO: Tempo total de processamento: {exec_time:.2f}s")
@@ -1020,7 +1025,7 @@ class OdooTextToSQL:
             if query_exec_time:
                 print(f"INFO: Tempo de execução da query SQL: {query_exec_time:.2f}s")
             elif captured_query:
-                print("INFO: Query SQL gerada, mas tempo de execução não capturado (pode ser checker).")
+                print("INFO: Query SQL gerada, mas tempo de execução não capturado.")
             else:
                 print("AVISO: Nenhuma query SQL foi capturada pelo callback.")
 

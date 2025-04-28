@@ -201,32 +201,26 @@ example_prompt = PromptTemplate.from_template(
 )
 
 # 5. Prompt Few-Shot Dinâmico Final
-ODODO_FEW_SHOT_PROMPT = None
-if example_selector:
-    try:
-        ODODO_FEW_SHOT_PROMPT = FewShotPromptTemplate(
-            example_selector=example_selector,
-            example_prompt=example_prompt,
-            prefix=f"""{SAFETY_PREFIX}
+ODODO_FEW_SHOT_PROMPT = FewShotPromptTemplate(
+    example_selector=example_selector,
+    example_prompt=example_prompt,
+    prefix=f"""{SAFETY_PREFIX}
 
 {ODODO_STATIC_HINTS}
 
 Você é um especialista em PostgreSQL e Odoo. Dada uma pergunta de entrada, crie uma consulta PostgreSQL sintaticamente correta para executar contra um banco de dados Odoo.
-A menos que especificado de outra forma, não retorne mais do que {{top_k}} linhas.
+A menos que especificado de outra forma, não retorne mais do que 5 linhas.
 
-Você só pode usar as tabelas listadas abaixo. Não use tabelas que não estejam na lista. Tenha cuidado para não consultar colunas que não existem nas tabelas. Preste atenção à capitalização das tabelas e colunas.
+Você só pode usar as tabelas listadas abaixo. Não use tabelas que não estejam na lista. Tenha cuidado para não consultar colunas que não existem nas tabelas. Preste atenção à capitalização das tabelas e colunas.""",
+    suffix="""
+INFORMAÇÕES DAS TABELAS:
+{table_info}
 
-Aqui estão as informações das tabelas relevantes:
-{{table_info}}
-
-Abaixo estão alguns exemplos de perguntas e suas consultas SQL correspondentes:""",
-            suffix="Pergunta do Usuário: {input}\nConsulta SQL:",
-            input_variables=["input", "top_k", "table_info"],
-        )
-        print("INFO: Prompt dinâmico few-shot criado com sucesso usando example_prompt.")
-    except Exception as e:
-        print(f"ERRO ao criar FewShotPromptTemplate: {e}")
-        ODODO_FEW_SHOT_PROMPT = None
+Pergunta: {input}
+Consulta SQL:""",
+    input_variables=["input", "table_info"],
+    partial_variables={"top_k": 5}
+)
 
 if not ODODO_FEW_SHOT_PROMPT:
     print("AVISO: Falha ao criar o seletor de exemplos ou o prompt final. Usando prompt padrão sem few-shot.")
