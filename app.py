@@ -128,9 +128,53 @@ def main():
                     st.code(sql_output, language="sql")
                     st.divider()
                     st.subheader("Execução e Interpretação")
-                    st.warning("A execução direta da consulta no banco de dados e a interpretação da resposta ainda precisam ser implementadas.")
-                    # Aqui você adicionaria a lógica para realmente executar a query `sql_output`
-                    # usando sql_agent.db.run(sql_output) ou similar e exibir os resultados.
+                    
+                    # Botão para executar a consulta
+                    if st.button("Executar Consulta", type="primary"):
+                        try:
+                            with st.spinner("Executando consulta..."):
+                                # Executa a query e obtém os resultados
+                                results = sql_agent.execute_safe_query(sql_output)
+                                
+                                if isinstance(results, pd.DataFrame):
+                                    if not results.empty:
+                                        # Exibe o número de resultados
+                                        st.info(f"Encontrados {len(results)} resultados.")
+                                        
+                                        # Adiciona opções de visualização
+                                        view_option = st.radio(
+                                            "Formato de visualização:",
+                                            ["Tabela", "JSON"],
+                                            horizontal=True
+                                        )
+                                        
+                                        if view_option == "Tabela":
+                                            # Exibe como tabela interativa
+                                            st.dataframe(
+                                                results,
+                                                use_container_width=True,
+                                                hide_index=True
+                                            )
+                                        else:
+                                            # Exibe como JSON formatado
+                                            st.json(results.to_dict(orient='records'))
+                                        
+                                        # Adiciona opção de download
+                                        csv = results.to_csv(index=False)
+                                        st.download_button(
+                                            label="Download CSV",
+                                            data=csv,
+                                            file_name="resultados_consulta.csv",
+                                            mime="text/csv"
+                                        )
+                                    else:
+                                        st.warning("A consulta não retornou resultados.")
+                                else:
+                                    st.error(f"Formato de resultado inesperado: {type(results)}")
+                                    
+                        except Exception as e:
+                            st.error(f"Erro ao executar a consulta: {str(e)}")
+                    
                 else:
                     # Exibe a mensagem de erro que veio do agente
                     st.error(sql_output)

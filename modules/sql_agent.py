@@ -555,7 +555,7 @@ IMPORTANT BUSINESS TABLES:
             ref_table = fk.get("referred_table", "Unknown")
             if fk_cols and ref_cols:
                 fk_str = f"- {fk_cols} -> {ref_table}.{ref_cols}"
-                fk_info.append(fk_str)
+            fk_info.append(fk_str)
         
         # Formata o conteúdo
         content = f"""
@@ -730,7 +730,7 @@ class OdooTextToSQL:
     """Classe principal otimizada para processamento de consultas text-to-SQL em bancos Odoo"""
     
     def __init__(self, db_uri: str, use_checkpoint: bool = True, force_reprocess: bool = False, 
-                data_dir: Optional[str] = None, enable_llm_cache: bool = True):
+                 data_dir: Optional[str] = None, enable_llm_cache: bool = True):
         config = Config()
         self.db_uri = db_uri
         self.use_checkpoint = use_checkpoint
@@ -767,6 +767,9 @@ class OdooTextToSQL:
             api_key=config.openai_api_key
         )
         
+        # Cria o engine diretamente da string de conexão
+        self.engine = create_engine(db_uri)
+        # Cria o SQLDatabase com o engine criado
         self.db = SQLDatabase.from_uri(db_uri)
         self.vector_store = self._get_or_create_schema_embeddings()
         self.toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
@@ -1034,3 +1037,43 @@ class OdooTextToSQL:
     # Comentar ou remover ask_agent se não for usado
     # async def ask_agent(self, question: str) -> dict:
     #     ...
+
+    def execute_safe_query(self, query: str) -> pd.DataFrame:
+        """
+        Executa uma consulta SQL de maneira segura e retorna um DataFrame
+        
+        Args:
+            query (str): A consulta SQL a ser executada
+            
+        Returns:
+            pd.DataFrame: DataFrame com os resultados da consulta
+            
+        Raises:
+            ValueError: Se a consulta não for do tipo SELECT
+        """
+        # Verifica se é uma consulta SELECT
+        query = query.strip()
+        if not query.upper().startswith('SELECT'):
+            raise ValueError("Apenas consultas SELECT são permitidas por motivos de segurança.")
+        
+        try:
+            # Usa pandas read_sql diretamente com o engine
+            df = pd.read_sql(query, self.engine)
+            
+            # Verifica se o DataFrame está vazio
+            if df.empty:
+                print("A consulta não retornou resultados.")
+            else:
+                print(f"Consulta executada com sucesso. Retornados {len(df)} registros.")
+                
+            return df
+                
+        except Exception as e:
+            error_msg = str(e)
+            if "UndefinedColumn" in error_msg:
+                # Fornece uma mensagem mais amigável para erro de coluna indefinida
+                column_match = re.search(r'column (.*?) does not exist', error_msg)
+                if column_match:
+                    bad_column = column_match.group(1)
+                    raise Exception(f"Erro: A coluna {bad_column} não existe. Verifique o nome da coluna e a tabela correta.")
+            raise Exception(f"Erro ao executar a consulta: {error_msg}")
