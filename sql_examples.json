@@ -1,0 +1,31 @@
+[
+  {
+    "question": "Quais produtos foram vendidos nos últimos 30 dias, mas não têm estoque em mãos?",
+    "query": "SELECT\n    pt.name AS produto,\n    SUM(sol.product_uom_qty) AS total_vendido,\n    COALESCE(SUM(sq.quantity), 0) AS estoque\nFROM sale_order_line sol\nJOIN product_product pp ON sol.product_id = pp.id\nJOIN product_template pt ON pp.product_tmpl_id = pt.id\nLEFT JOIN stock_quant sq ON pp.id = sq.product_id AND sq.location_id = (SELECT id FROM stock_location WHERE name = 'Stock' LIMIT 1)\nJOIN sale_order so ON sol.order_id = so.id\nWHERE so.date_order >= NOW() - INTERVAL '30 days'\nGROUP BY pt.id, pt.name\nHAVING SUM(sol.product_uom_qty) > 0 AND COALESCE(SUM(sq.quantity), 0) = 0;"
+  },
+  {
+    "question": "Quais são os 5 clientes que mais compraram nos últimos 3 meses?",
+    "query": "SELECT\n   rp.name AS cliente,\n   SUM(so.amount_total) AS total_comprado\nFROM\nsale_order so\nJOIN\nres_partner rp ON so.partner_id = rp.id\nWHERE\nso.date_order >= CURRENT_DATE - INTERVAL '3 months'\nAND so.state IN ('sale', 'done')\nGROUP BY \nrp.name\nORDER BY\ntotal_comprado DESC\nLIMIT 5;"
+  },
+  {
+    "question": "Relatório de margem de lucro por produto nas vendas do último trimestre",
+    "query": "SELECT    \n    pt.name AS produto,\n   pt.default_code AS codigo,\n    SUM(sol.product_uom_qty) AS quantidade_vendida,\n   SUM(sol.price_subtotal) AS valor_vendido,\n   SUM(sol.product_uom_qty * COALESCE(ip.value_float, 0)) AS custo_total,\n    SUM(sol.price_subtotal) - SUM(sol.product_uom_qty * COALESCE(ip.value_float, 0)) AS lucro_bruto,\nCASE\nWHEN SUM(sol.price_subtotal) = 0 THEN 0\nELSE ROUND(\n(\n(SUM(sol.price_subtotal) - SUM(sol.product_uom_qty * COALESCE(ip.value_float, 0))) /\nSUM(sol.price_subtotal) * 100\n)::NUMERIC,\n2\n)\nEND AS margem_percentual\nFROM\nsale_order_line sol\nJOIN\nsale_order so ON sol.order_id = so.id\nJOIN\nproduct_product pp ON sol.product_id = pp.id\nJOIN\nproduct_template pt ON pp.product_tmpl_id = pt.id\nLEFT JOIN\nir_property ip ON (ip.name = 'standard_price'\nAND ip.res_id = CONCAT('product.product,', pp.id)\nAND ip.company_id = so.company_id)\nWHERE\nso.date_order >= CURRENT_DATE - INTERVAL '3 months'\nAND so.state IN ('sale', 'done')\nGROUP BY\npt.id, pt.name, pt.default_code\nHAVING\nSUM(sol.product_uom_qty) > 0\nORDER BY\nmargem_percentual DESC;"
+  },
+  {
+    "question": "Qual o valor total de compras por fornecedor este ano?",
+    "query": "SELECT    \n    rp.name AS fornecedor,\n    SUM(po.amount_total) AS total_comprado,\n   COUNT(po.id) AS numero_pedidos\nFROM\npurchase_order po\nJOIN\nres_partner rp ON po.partner_id = rp.id\nWHERE\nEXTRACT(YEAR FROM po.date_order) = EXTRACT(YEAR FROM CURRENT_DATE)\nAND po.state IN ('purchase', 'done')\nGROUP BY\nrp.name\nORDER BY\ntotal_comprado DESC;"
+  },
+  {
+    "question": "Qual o total de vendas agrupado por mês para o ano de 2023?",
+    "query": "SELECT \n    TO_CHAR(so.date_order, 'YYYY-MM') AS mes,\n    SUM(so.amount_total) AS total_vendas\nFROM \n    sale_order so\nWHERE \n    EXTRACT(YEAR FROM so.date_order) = 2023\n    AND so.state IN ('sale', 'done')\nGROUP BY \n    mes\nORDER BY \n    mes;"
+  },
+  {
+    "question": "Quais são as condições de pagamento usadas nas vendas?",
+    "query":" SELECT so.name AS numero_pedido, pt.name AS condicao_pagamento FROM sale_order so LEFT JOIN account_payment_term pt ON so.payment_term_id = pt.id ORDER BY so.date_order DESC;"
+  }
+]
+
+
+
+
+

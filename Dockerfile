@@ -18,8 +18,12 @@ RUN apt-get update && \
 
 # Copia o restante do código da aplicação
 COPY ./modules /app/modules
-COPY data /app/
 COPY app.py /app/
+COPY sql_examples.json /app/sql_examples.json
+# Copia o arquivo para dentro da pasta já no build context self.data_dir = "data"
+
+
+RUN ls -l /app/
 
 # Expõe a porta padrão do Streamlit
 EXPOSE 8501
