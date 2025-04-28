@@ -948,161 +948,89 @@ class OdooTextToSQL:
         
         return relationships
 
-    def enhance_query_with_table_info(self, query: str, tables: List[str]) -> str:
-        """Enriquece a consulta com informações sobre tabelas relevantes e suas relações"""
-        # Coleta informações sobre estrutura das tabelas
+    def _generate_table_info_string(self, tables: List[str]) -> str:
+        """Gera a string formatada com informações das tabelas para o prompt."""
         table_structures = []
         for table in tables:
-            table_info = self.schema_extractor.extract_table_structure_document(table)
-            table_structures.append(table_info.page_content)
-        
-        # Obtém relacionamentos entre as tabelas
-        relationships = self.get_table_relationships(tables)
-        relationship_info = []
-        
-        for table, related_tables in relationships.items():
-            if related_tables:
-                rel_str = f"Tabela {table} relaciona-se com: {', '.join(related_tables)}"
-                relationship_info.append(rel_str)
-        
-        # Coleta amostras de dados apenas para tabelas principais (no máximo 3)
-        sample_data_info = []
-        important_tables = [t for t in tables if self.schema_extractor._is_important_table(t)][:3]
-        
-        for table in important_tables:
-            data_doc = self.schema_extractor.extract_table_data_document(table)
-            if data_doc:
-                sample_data_info.append(data_doc.page_content)
-        
-        # Cria prompt enriquecido
-        enhanced_query = f"""
-Pergunta: {query}
+            structure_doc = self.schema_extractor.extract_table_structure_document(table)
+            table_structures.append(structure_doc.page_content)
+        return "\n\n".join(table_structures)
 
-Tabelas relevantes para esta consulta:
-
-{chr(10).join(table_structures)}
-
-Relacionamentos entre tabelas:
-{chr(10).join(relationship_info) if relationship_info else "Não foram identificados relacionamentos diretos entre estas tabelas."}
-
-{chr(10).join(sample_data_info) if sample_data_info else ""}
-
-Por favor, gere uma consulta SQL que responda à pergunta usando estas tabelas. 
-Use joins quando apropriado e prefira JOINs explícitos (ex: INNER JOIN) em vez de junções na cláusula WHERE.
-Inclua aliases de tabela para melhorar a legibilidade.
-"""
-        return enhanced_query
-    
     def get_query_from_cache(self, question: str) -> Optional[Dict[str, Any]]:
         """Verifica se há resultado em cache para a pergunta"""
-        # Usamos uma chave simplificada para maximizar chance de cache hit
         question_key = question.lower().strip()
         return self.query_cache.get(question_key)
-    
+
     def add_query_to_cache(self, question: str, result: Dict[str, Any], query: Optional[str]):
         """Adiciona o resultado e query ao cache"""
         question_key = question.lower().strip()
+        main_query_output = result.get("output") if isinstance(result, dict) else result
         self.query_cache[question_key] = {
-            'result': result,
+            'result': {"output": main_query_output},
             'query': query,
             'timestamp': time.time()
         }
-    
-    def query(self, user_question: str) -> Tuple[Dict[str, Any], Optional[str]]:
+
+    def query(self, user_question: str, top_k_results: int = 5) -> Tuple[Dict[str, Any], Optional[str]]:
         """
-        Processa pergunta do usuário, captura a query SQL via callback,
-        e retorna o resultado do agente e a query capturada.
+        Processa pergunta do usuário, encontra tabelas, formata informações,
+        invoca a cadeia SQL com os inputs corretos, captura a query SQL via callback,
+        e retorna o resultado e a query capturada.
         """
-        # Verifica primeiro o cache
         cached_data = self.get_query_from_cache(user_question)
         if cached_data:
-            print("Usando resultado em cache")
+            print("INFO: Usando resultado em cache.")
             return cached_data['result'], cached_data['query']
-        
-        # Reseta o callback antes de cada consulta
-        self.query_callback_handler.reset()
-        
-        # Encontra tabelas relevantes para a consulta
-        relevant_tables = self.find_relevant_tables(user_question)
-        print(f"Tabelas relevantes: {', '.join(relevant_tables)}")
-        
-        # Enriquece a pergunta com informações de schema
-        enhanced_question = self.enhance_query_with_table_info(user_question, relevant_tables)
-        
-        # Registra tempo de início
-        start_time = time.time()
-        
-        # Executa o agente passando o callback handler
-        result = self.chain.invoke(
-            {"question": enhanced_question},
-            config={"callbacks": [self.query_callback_handler]} # Passa o handler aqui
-        )
-        
-        # Registra tempo de execução total
-        exec_time = time.time() - start_time
-        print(f"Tempo total de processamento: {exec_time:.2f}s")
-        
-        # Obtém a query capturada pelo callback
-        captured_query = self.query_callback_handler.get_captured_query()
-        query_exec_time = self.query_callback_handler.get_execution_time()
-        
-        if query_exec_time:
-            print(f"Tempo de execução da query: {query_exec_time:.2f}s")
-        
-        # Adiciona ao cache
-        self.add_query_to_cache(user_question, result, captured_query)
-        
-        # Retorna tanto o resultado quanto a query capturada
-        return result, captured_query            
 
-    async def ask_agent(self, question: str) -> dict:
-        """
-        Recebe uma pergunta, gera a consulta SQL usando a cadeia,
-        executa a consulta usando o toolkit e retorna a resposta.
-        """
-        self.logger.info(f"Recebida pergunta para o agente SQL: {question}")
-        if not self.chain:
-            self.logger.error("Erro: Cadeia SQL não inicializada.")
-            return {"error": "Cadeia SQL não inicializada corretamente."}
+        self.query_callback_handler.reset()
+
+        relevant_tables = self.find_relevant_tables(user_question)
+        if not relevant_tables:
+            print("AVISO: Nenhuma tabela relevante encontrada. A consulta pode falhar.")
+            table_info_str = "Nenhuma tabela relevante encontrada."
+        else:
+            print(f"INFO: Tabelas relevantes encontradas: {', '.join(relevant_tables)}")
+            table_info_str = self._generate_table_info_string(relevant_tables)
+
+        chain_input = {
+            "question": user_question,
+            "input": user_question,
+            "top_k": top_k_results,
+            "table_info": table_info_str
+        }
+
+        start_time = time.time()
 
         try:
-            # 1. Gerar a consulta SQL usando a cadeia e a pergunta original
-            self.logger.info(f"Enviando pergunta para a cadeia SQL: '{question}'")
-            # O 'top_k' e 'table_info' são gerenciados internamente pelo create_sql_query_chain
-            # passando a 'question' como 'input' para o prompt.
-            sql_query = await self.chain.ainvoke({"question": question})
-            self.logger.info(f"Consulta SQL gerada: {sql_query}")
+            # A cadeia agora recebe 'question', 'input', 'top_k', e 'table_info'
+            result = self.chain.invoke(
+                chain_input,
+                config={"callbacks": [self.query_callback_handler]}
+            )
 
-            # Validação básica da query gerada (apenas SELECT)
-            if not isinstance(sql_query, str) or not sql_query.strip().upper().startswith("SELECT"):
-                 self.logger.warning(f"Consulta gerada não é um SELECT válido: {sql_query}")
-                 # Tenta extrair a query se estiver dentro de um bloco de código ou texto
-                 match = re.search(r"```(?:sql)?\s*(SELECT.*?;?)\s*```", sql_query, re.DOTALL | re.IGNORECASE)
-                 if match:
-                     sql_query = match.group(1).strip()
-                     self.logger.info(f"Consulta SELECT extraída: {sql_query}")
-                     if not sql_query.upper().startswith("SELECT"):
-                          raise ValueError("A consulta extraída ainda não é um SELECT válido.")
-                 else:
-                     raise ValueError(f"A consulta gerada não é um SELECT válido e não foi possível extrair: {sql_query}")
+            exec_time = time.time() - start_time
+            print(f"INFO: Tempo total de processamento: {exec_time:.2f}s")
 
+            captured_query = self.query_callback_handler.get_captured_query()
+            query_exec_time = self.query_callback_handler.get_execution_time()
 
-            # 2. Executar a consulta SQL usando a ferramenta do toolkit
-            query_execution_tool = next((t for t in self.toolkit.get_tools() if t.name == "sql_db_query"), None)
+            if query_exec_time:
+                print(f"INFO: Tempo de execução da query SQL: {query_exec_time:.2f}s")
+            elif captured_query:
+                print("INFO: Query SQL gerada, mas tempo de execução não capturado (pode ser checker).")
+            else:
+                print("AVISO: Nenhuma query SQL foi capturada pelo callback.")
 
-            if not query_execution_tool:
-                self.logger.error("Erro: Ferramenta 'sql_db_query' não encontrada no toolkit.")
-                return {"error": "Erro interno: Ferramenta de execução de SQL não encontrada."}
-
-            self.logger.info(f"Executando a consulta SQL...")
-            # A ferramenta sql_db_query espera a consulta SQL como argumento
-            final_answer = await query_execution_tool.arun(sql_query)
-            self.logger.info(f"Resposta recebida do banco de dados.") # Não logar a resposta diretamente por segurança/privacidade
-
-            return {"answer": final_answer, "generated_query": sql_query}
-
+            final_result_dict = {"output": result}
+            self.add_query_to_cache(user_question, final_result_dict, captured_query)
+            return final_result_dict, captured_query
 
         except Exception as e:
-            self.logger.error(f"Erro durante a execução em ask_agent: {e}", exc_info=True) # Log com traceback
-            # Considerar retornar mensagens de erro mais amigáveis ao usuário final
-            return {"error": f"Ocorreu um erro ao processar sua pergunta. Detalhes: {e}"}            
+            print(f"ERRO durante a execução da cadeia SQL: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"output": f"Erro ao gerar consulta SQL: {e}"}, None
+
+    # Comentar ou remover ask_agent se não for usado
+    # async def ask_agent(self, question: str) -> dict:
+    #     ...

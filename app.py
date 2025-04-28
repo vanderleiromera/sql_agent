@@ -93,66 +93,57 @@ def main():
                 st.rerun()
         
         if st.button("Executar consulta", type="primary"):
-            # Verifica se há algo no session_state.question (seja de exemplo ou digitado)
             if not st.session_state.question:
                 st.error("Por favor, digite uma pergunta ou selecione um exemplo!")
-                return # Não use st.stop() aqui, apenas retorne
-            
+                return
+
             with st.spinner("Processando sua pergunta..."):
-                # Usa a pergunta do session_state
                 current_question = st.session_state.question
-                # Encontrar tabelas relevantes
-                relevant_tables = sql_agent.find_relevant_tables(current_question)
-                st.session_state.tables = relevant_tables
-                
-                # Executar consulta
+                # O método query agora lida internamente com tabelas e formatação
+                # agent_result é o dicionário {'output': <query_sql>}
+                # captured_sql_query é a mesma query (se capturada pelo callback)
                 agent_result, captured_sql_query = sql_agent.query(current_question)
+
+                # Armazenamos o resultado principal
                 st.session_state.result = agent_result
-                st.session_state.sql_query = captured_sql_query
-                
-                # Limpa tabelas relevantes antigas se existirem
+                # Armazenamos a query capturada (pode ser útil para logs/depuração)
+                # ou podemos usar diretamente agent_result['output']
+                st.session_state.sql_query = agent_result.get("output") # Usar a query do resultado principal
+
+                # Limpa 'tables' se existir, pois não é mais usado diretamente aqui
                 if 'tables' in st.session_state:
                     del st.session_state['tables']
-                
-                # Atualiza tabelas relevantes (opcional, pode vir do agente se modificado)
-                # relevant_tables = sql_agent.find_relevant_tables(current_question)
-                # st.session_state.tables = relevant_tables
-    
+
     with col2:
         st.header("Resposta do Agente")
-        
-        # Exibe a query SQL se foi capturada
-        if "sql_query" in st.session_state and st.session_state.sql_query:
-            st.subheader("Consulta SQL Gerada")
-            st.code(st.session_state.sql_query, language="sql")
-        elif "result" in st.session_state: # Exibe info apenas se houve uma execução
-            st.subheader("Consulta SQL Gerada")
-            st.info("Consulta SQL não foi capturada pelo callback nesta execução.")
-        
-        st.divider() # Separador
 
-        # Exibe o resultado final do agente
-        if "result" in st.session_state:
-            st.subheader("Resultados")
-            result_data = st.session_state.result
-            final_answer = "Erro ao obter 'output'"
+        # Exibe a query SQL se ela existir no resultado
+        if "result" in st.session_state and isinstance(st.session_state.result, dict) and st.session_state.result.get("output"):
+            st.subheader("Consulta SQL Gerada")
+            # Verifica se a saída é uma string (a query) antes de exibi-la com st.code
+            sql_output = st.session_state.result["output"]
+            if isinstance(sql_output, str):
+                # Verifica se não é uma mensagem de erro
+                if not sql_output.startswith("Erro ao gerar consulta SQL:"):
+                    st.code(sql_output, language="sql")
+                    st.divider()
+                    st.subheader("Execução e Interpretação")
+                    st.warning("A execução direta da consulta no banco de dados e a interpretação da resposta ainda precisam ser implementadas.")
+                    # Aqui você adicionaria a lógica para realmente executar a query `sql_output`
+                    # usando sql_agent.db.run(sql_output) ou similar e exibir os resultados.
+                else:
+                    # Exibe a mensagem de erro que veio do agente
+                    st.error(sql_output)
 
-            if isinstance(result_data, dict):
-                final_answer = result_data.get("output", "Chave 'output' não encontrada no resultado.")
-            elif isinstance(result_data, str):
-                final_answer = result_data
             else:
-                final_answer = str(result_data)
+                # Caso inesperado onde 'output' não é string
+                st.error(f"Formato inesperado no resultado: {sql_output}")
 
-            # Tenta exibir o resultado final (geralmente texto interpretado)
-            # print(f"DEBUG: final_answer type = {type(final_answer)}") # Remover log
-            # print(f"DEBUG: final_answer repr = {repr(final_answer)}") # Remover log
-            st.text(final_answer)  # Usar st.text para preservar quebras de linha
+        elif "result" in st.session_state: # Se houve execução mas sem 'output'
+            st.info("Não foi possível gerar ou exibir a consulta SQL.")
 
-            # Opcional: Exibir tabelas relevantes se armazenadas
-            # if "tables" in st.session_state and st.session_state.tables:
-            #    st.subheader("Tabelas Relevantes Identificadas")
-            #    st.write(", ".join(st.session_state.tables))
+        # Removido o bloco que exibia o resultado interpretado, pois agora o foco é gerar a query.
+        # A execução e interpretação seriam o próximo passo.
 
         else:
             st.write("Aguardando a execução de uma consulta...")

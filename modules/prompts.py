@@ -1,10 +1,11 @@
 # Arquivo: modules/prompts.py
 import os
-import chromadb # Importar a biblioteca principal do Chroma
+import chromadb
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.example_selectors import SemanticSimilarityExampleSelector
 from langchain_core.prompts import FewShotPromptTemplate, PromptTemplate
+from langchain.schema import Document
 
 # Prefixo de segurança para o Agente SQL
 SAFETY_PREFIX = """IMPORTANTE: Você está interagindo com um banco de dados SQL. Sua única função é gerar consultas SQL do tipo SELECT para responder às perguntas dos usuários.
@@ -27,12 +28,14 @@ Dicas importantes sobre Odoo:
 # --- Fim do Contexto Estático ---
 
 # --- Constantes ---
-# Use uma variável de ambiente ou um caminho fixo DENTRO do contêiner
-CHROMA_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", "/app/chroma_db")
+# Diretório base mapeado pelo Docker Volume
+BASE_DATA_DIR = "/app/data"
+# Subdiretório específico para os exemplos few-shot
+CHROMA_FEW_SHOT_DIR = os.path.join(BASE_DATA_DIR, "few_shot_examples")
 CHROMA_COLLECTION_NAME = "odoo_sql_examples"
 
-# Cria o diretório de persistência se não existir (importante para a primeira execução)
-os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
+# Cria o diretório de persistência específico se não existir
+os.makedirs(CHROMA_FEW_SHOT_DIR, exist_ok=True)
 
 # --- Configuração do Prompt Dinâmico Few-Shot ---
 
@@ -70,11 +73,11 @@ examples = [
         "input": "Quais são as categorias de produtos?",
         "query": "SELECT name FROM product_category;",
     },
-     {
+    {
         "input": "Liste todos os pedidos de venda confirmados.",
         "query": "SELECT name, partner_id, date_order FROM sale_order WHERE state = 'sale';",
     },
-     {
+    {
         "input": "Quem são os 5 principais clientes por valor total de pedidos de venda?",
         "query": """
             SELECT rp.name, SUM(so.amount_total) as total_spent
@@ -88,80 +91,123 @@ examples = [
     },
 ]
 
-# --- Inicialização do ChromaDB com Persistência ---
+# --- Inicialização do VectorStore e Seletor ---
 vectorstore = None
+example_selector = None
 embeddings = None
+
 try:
     embeddings = OpenAIEmbeddings()
+    chroma_client = chromadb.PersistentClient(path=CHROMA_FEW_SHOT_DIR)
+    collection = None
 
-    # Inicializa o cliente Chroma apontando para o diretório persistente
-    # DeprecationWarning: Deprecated class Chroma. Use from chromadb.Client object (https://docs.trychroma.com/getting-started)
-    # Usando a abordagem recomendada com o cliente ChromaDB:
-    chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
-
-    # Tenta obter a coleção. Se não existir, será criada depois.
+    # Tenta obter a coleção
     try:
         collection = chroma_client.get_collection(name=CHROMA_COLLECTION_NAME)
-        print(f"INFO: Coleção Chroma '{CHROMA_COLLECTION_NAME}' carregada do diretório '{CHROMA_PERSIST_DIR}'. Count: {collection.count()}")
-        # Se a coleção existe mas está vazia (improvável, mas possível), recriamos
-        if collection.count() == 0:
-             print(f"AVISO: Coleção Chroma '{CHROMA_COLLECTION_NAME}' encontrada mas vazia. Recriando...")
-             chroma_client.delete_collection(name=CHROMA_COLLECTION_NAME) # Remove a vazia
-             raise chromadb.exceptions.CollectionNotFoundError # Força a criação abaixo
+        print(f"INFO: Coleção Chroma '{CHROMA_COLLECTION_NAME}' encontrada em '{CHROMA_FEW_SHOT_DIR}'. Verificando contagem...")
+    except Exception:
+        print(f"AVISO: Coleção '{CHROMA_COLLECTION_NAME}' não encontrada. Será criada.")
+        collection = None
 
-        # Cria a interface LangChain VectorStore usando a coleção existente
+    # Verifica se vazia ou não encontrada
+    if collection and collection.count() == 0:
+        print(f"AVISO: Coleção '{CHROMA_COLLECTION_NAME}' encontrada vazia. Recriando...")
+        chroma_client.delete_collection(name=CHROMA_COLLECTION_NAME)
+        collection = None
+
+    # Cria/Recria se necessário, usando from_texts
+    if collection is None:
+        print(f"INFO: Criando/Recriando coleção '{CHROMA_COLLECTION_NAME}' com from_texts...")
+        input_texts = [example["input"] for example in examples]
+        metadatas = [{"query": example["query"]} for example in examples]
+        ids = [f"example_{i}" for i, _ in enumerate(examples)]
+
+        vectorstore = Chroma.from_texts(
+            client=chroma_client,
+            texts=input_texts,
+            embedding=embeddings,
+            metadatas=metadatas,
+            ids=ids,
+            collection_name=CHROMA_COLLECTION_NAME,
+            persist_directory=CHROMA_FEW_SHOT_DIR
+        )
+        print(f"INFO: Coleção criada/recriada. Count: {vectorstore._collection.count()}")
+    else:
+        # Carrega a vectorstore existente
+        print(f"INFO: Carregando coleção existente '{CHROMA_COLLECTION_NAME}'. Count: {collection.count()}")
         vectorstore = Chroma(
             client=chroma_client,
             collection_name=CHROMA_COLLECTION_NAME,
             embedding_function=embeddings,
-            persist_directory=CHROMA_PERSIST_DIR # Ainda útil para LangChain saber onde está
+            persist_directory=CHROMA_FEW_SHOT_DIR
         )
 
-    except chromadb.exceptions.CollectionNotFoundError:
-        print(f"INFO: Coleção Chroma '{CHROMA_COLLECTION_NAME}' não encontrada. Criando e populando...")
-        # Coleção não existe, cria usando from_examples (que usa o cliente implicitamente se disponível)
-        # ou diretamente com o cliente. LangChain recomenda passar o cliente.
-        vectorstore = Chroma.from_examples(
-            client=chroma_client, # Garante que use o cliente persistente
-            examples=examples,
-            embedding=embeddings,
-            ids=[f"example_{i}" for i, _ in enumerate(examples)],
-            collection_name=CHROMA_COLLECTION_NAME,
-            persist_directory=CHROMA_PERSIST_DIR # Informa ao LangChain onde persistir
+    # Criando um seletor personalizado que adapta os documentos para o formato esperado
+    class CustomExampleSelector(SemanticSimilarityExampleSelector):
+        def select_examples(self, input_variables):
+            try:
+                # First try getting examples through parent class
+                docs = super().select_examples(input_variables)
+                
+                # Handle both Document objects and dicts
+                converted_examples = []
+                for doc in docs:
+                    if hasattr(doc, 'page_content'):
+                        # It's a Document object
+                        example = {
+                            "input": doc.page_content,
+                            "query": doc.metadata.get("query", "")
+                        }
+                    elif isinstance(doc, dict):
+                        # It's already a dict
+                        example = {
+                            "input": doc.get("input", ""),
+                            "query": doc.get("query", "")
+                        }
+                    else:
+                        continue  # Skip invalid formats
+                        
+                    converted_examples.append(example)
+                    
+                return converted_examples
+                
+            except Exception as e:
+                print(f"Error in example selection: {e}")
+                # Return empty list as fallback
+                return []
+
+    # Inicializa o seletor personalizado
+    if vectorstore:
+        example_selector = CustomExampleSelector(
+            vectorstore=vectorstore,
+            k=5,
+            input_keys=["input"]
         )
-        # Não é mais necessário chamar vectorstore.persist() explicitamente com PersistentClient
-        print(f"INFO: Coleção Chroma '{CHROMA_COLLECTION_NAME}' criada e persistida em '{CHROMA_PERSIST_DIR}'.")
+        print("INFO: Seletor de exemplos dinâmicos personalizado inicializado com vectorstore existente.")
 
 except Exception as e:
-    print(f"ERRO CRÍTICO ao inicializar embeddings ou ChromaDB em prompts.py: {e}")
-    # Tratar o erro como apropriado. Sem vectorstore, o fallback será usado.
+    print(f"ERRO CRÍTICO ao inicializar embeddings, ChromaDB ou Seletor em prompts.py: {e}")
+    import traceback
+    traceback.print_exc()
     embeddings = None
     vectorstore = None
+    example_selector = None
 
-# --- Fim da Inicialização do ChromaDB ---
+# --- Fim da Inicialização ---
 
-# 3. Seletor de Similaridade
-if vectorstore:
-    example_selector = SemanticSimilarityExampleSelector(
-        vectorstore=vectorstore,
-        k=5,
-        input_keys=["input"],
-    )
-else:
-    example_selector = None # Falha na inicialização
-
-# 4. Prompt para Exemplos Individuais
+# 4. Prompt para exemplo individual (agora esperando as chaves corretas)
 example_prompt = PromptTemplate.from_template(
     "Pergunta do Usuário: {input}\nConsulta SQL: {query}"
 )
 
 # 5. Prompt Few-Shot Dinâmico Final
-#    Nota: O prefixo combina o SAFETY_PREFIX com as instruções SQL.
+ODODO_FEW_SHOT_PROMPT = None
 if example_selector:
-    ODODO_FEW_SHOT_PROMPT = FewShotPromptTemplate(
-        example_selector=example_selector,
-        example_prompt=example_prompt,
-        prefix=f"""{SAFETY_PREFIX}
+    try:
+        ODODO_FEW_SHOT_PROMPT = FewShotPromptTemplate(
+            example_selector=example_selector,
+            example_prompt=example_prompt,
+            prefix=f"""{SAFETY_PREFIX}
 
 {ODODO_STATIC_HINTS}
 
@@ -174,19 +220,19 @@ Aqui estão as informações das tabelas relevantes:
 {{table_info}}
 
 Abaixo estão alguns exemplos de perguntas e suas consultas SQL correspondentes:""",
-        suffix="Pergunta do Usuário: {input}\nConsulta SQL:",
-        input_variables=["input", "top_k", "table_info"],
-    )
-else:
-    # Fallback: Crie um prompt simples sem few-shot se o seletor falhou
-    print("AVISO: Falha ao criar o seletor de exemplos. Usando prompt padrão sem few-shot.")
-    # Você pode definir um PromptTemplate básico aqui como alternativa
-    # Exemplo:
-    # ODODO_FEW_SHOT_PROMPT = PromptTemplate.from_template(
-    #     f"{SAFETY_PREFIX}\n\nInstruções SQL básicas... {{table_info}}\n\nPergunta: {{input}}\nSQL:"
-    # )
-    # Ou simplesmente definir como None e tratar isso no sql_agent.py
-    ODODO_FEW_SHOT_PROMPT = None
+            suffix="Pergunta do Usuário: {input}\nConsulta SQL:",
+            input_variables=["input", "top_k", "table_info"],
+        )
+        print("INFO: Prompt dinâmico few-shot criado com sucesso usando example_prompt.")
+    except Exception as e:
+        print(f"ERRO ao criar FewShotPromptTemplate: {e}")
+        ODODO_FEW_SHOT_PROMPT = None
+
+if not ODODO_FEW_SHOT_PROMPT:
+    print("AVISO: Falha ao criar o seletor de exemplos ou o prompt final. Usando prompt padrão sem few-shot.")
+    # Corrigindo o fallback - removendo input_variables explicito
+    DEFAULT_PROMPT_STR = f"{SAFETY_PREFIX}\n\nInstruções: Gere uma consulta SQL SELECT para responder à pergunta baseado nas tabelas abaixo.\n\nTabelas:\n{{table_info}}\n\nPergunta: {{input}}\nConsulta SQL:"
+    ODODO_FEW_SHOT_PROMPT = PromptTemplate.from_template(DEFAULT_PROMPT_STR)  # Removido input_variables
 
 
 # --- Fim da Configuração do Prompt Dinâmico ---
