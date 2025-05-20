@@ -1,0 +1,54 @@
+# SQL Agent App - Diretrizes de Desenvolvimento
+
+## Visão Geral
+Este projeto é uma aplicação SQL QA que converte perguntas em linguagem natural para consultas SQL usando LangChain e LLMs. A aplicação permite que usuários façam perguntas sobre dados armazenados em um banco de dados PostgreSQL e recebam respostas baseadas em consultas SQL geradas automaticamente.
+
+## Arquitetura
+- **Interface Web**: Streamlit para interface de usuário intuitiva
+- **Processamento de Linguagem Natural**: LangChain para converter perguntas em SQL
+- **Banco de Dados**: PostgreSQL (Odoo database)
+- **Agente SQL**: Implementação baseada no tutorial SQL QA da LangChain
+
+## Componentes Principais
+1. **app.py**: Ponto de entrada da aplicação Streamlit
+2. **modules/sql_agent.py**: Implementação do agente SQL com LangChain
+3. **modules/config.py**: Configurações da aplicação
+4. **data/**: Armazenamento de checkpoints e vector store
+
+## Boas Práticas
+- Utilize o padrão ReAct para agentes SQL (Reasoning and Acting)
+- Implemente verificação de consultas antes da execução
+- Armazene metadados do schema para melhorar performance
+- Utilize callbacks para capturar consultas SQL geradas
+- Implemente cache para resultados frequentes
+- Adicione tratamento de erros para consultas inválidas
+
+## Fluxo de Trabalho
+1. Usuário insere pergunta em linguagem natural
+2. Sistema identifica tabelas relevantes
+3. Agente gera consulta SQL apropriada
+4. Sistema executa consulta no banco de dados
+5. Resposta é formatada e apresentada ao usuário
+
+## Segurança
+- Nunca execute consultas DML (INSERT, UPDATE, DELETE)
+- Valide todas as consultas antes da execução
+
+## Langchain Implementation
+1. SQLDatabaseToolkit
+2. System prompt
+3. Prompting strategies
+    a. Table definitions and example rows
+           - SQLDatabase.get_context
+    b. Few-shot examples
+4. Query checking
+    a. Query checker
+5. Large databases
+    a. Many tables
+- Validação da Consulta SQL antes da execução
+
+## Referências
+- [LangChain SQL QA Tutorial](https://python.langchain.com/docs/tutorials/sql_qa/)
+
+## Gerais
+- Responda em Português
