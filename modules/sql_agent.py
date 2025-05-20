@@ -17,8 +17,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from .config import Config
 # Importações adicionadas para Callbacks
 from langchain.callbacks.base import BaseCallbackHandler
-# --- Importa o prompt do arquivo prompts.py ---
-from .prompts import SAFETY_PREFIX
+# --- Importa os prompts do arquivo prompts.py ---
+from .prompts import SAFETY_PREFIX, FEW_SHOT_EXAMPLES
 import time
 from langchain_community.cache import SQLAlchemyCache
 from langchain.globals import set_llm_cache
@@ -109,7 +109,7 @@ ODOO_MODULE_MAP = {
 
 class SchemaExtractor:
     """Classe aprimorada para extrair metadados do esquema do banco de dados"""
-    
+
     def __init__(self, db_uri: str):
         self.db_uri = db_uri
         self.engine = create_engine(db_uri)
@@ -118,35 +118,35 @@ class SchemaExtractor:
         self.is_odoo = self._check_if_odoo()
         self.table_category_cache = {}
         self.module_cache = {}
-    
+
     def _check_if_odoo(self) -> bool:
         """Verifica se é um banco Odoo verificando tabelas características"""
         tables = self.get_all_tables()
         odoo_tables = {'ir_module_module', 'res_company', 'res_users'}
         return any(table in tables for table in odoo_tables)
-    
+
     def _infer_odoo_module(self, table_name: str) -> str:
         """Infere o módulo Odoo com base no nome da tabela"""
         if table_name in self.module_cache:
             return self.module_cache[table_name]
-        
+
         prefix = table_name.split('_')[0] if '_' in table_name else ''
         module = ODOO_MODULE_MAP.get(prefix, "other")
-        
+
         # Verificações adicionais para casos especiais
         if table_name.startswith('ir_'):
             module = "base"
         elif table_name.startswith('base_'):
             module = "base"
-        
+
         self.module_cache[table_name] = module
         return module
-    
+
     def _identify_table_category(self, table_name: str) -> str:
         """Identifica a categoria da tabela baseada em seu nome"""
         if table_name in self.table_category_cache:
             return self.table_category_cache[table_name]
-        
+
         # Verifica primeiramente as tabelas principais de negócio
         if table_name in ODOO_TABLE_CATEGORIES["main_business"]:
             category = "main_business"
@@ -164,84 +164,84 @@ class SchemaExtractor:
             category = "transactional"
         else:
             category = "other"
-        
+
         self.table_category_cache[table_name] = category
         return category
-    
+
     def _is_important_table(self, table_name: str) -> bool:
         """Determina se uma tabela é importante para consultas"""
         category = self._identify_table_category(table_name)
-        
+
         # Tabelas principais de negócio e transacionais são importantes
         if category in ["main_business", "transactional"]:
             return True
-        
+
         # Algumas tabelas de configuração são importantes
-        if category == "configuration" and any(important in table_name 
+        if category == "configuration" and any(important in table_name
                                             for important in ["company", "partner", "product"]):
             return True
-        
+
         # Tabelas técnicas, logs e outras são menos importantes
         return False
-    
+
     def _should_skip_table(self, table_name: str) -> bool:
         """Determina se uma tabela deve ser ignorada no processamento"""
         # Ignora tabelas problemáticas
         if table_name in PROBLEMATIC_TABLES and PROBLEMATIC_TABLES[table_name].get('skip', False):
             return True
-        
+
         # Tabelas técnicas específicas para pular
         if table_name.startswith(('ir_attachment', 'ir_cron', 'ir_translation', 'ir_ui_view')):
             return True
-        
+
         # Tabelas temporárias ou de sessão
         if '_tmp_' in table_name or table_name.startswith('session_'):
             return True
-        
+
         # Tabelas de log ou histórico
         category = self._identify_table_category(table_name)
         if category == "log_or_history":
             # Excluindo a maioria das tabelas de log, mas mantendo algumas importantes
             if not any(important in table_name for important in ["audit", "accounting"]):
                 return True
-        
+
         return False
-    
+
     def _should_include_sample_data(self, table_name: str) -> bool:
         """Determina se devemos incluir dados de amostra para uma tabela"""
         # Verifica configurações específicas para a tabela
         if table_name in PROBLEMATIC_TABLES:
             if PROBLEMATIC_TABLES[table_name].get('skip_sample_data', False):
                 return False
-        
+
         # Verifica configurações para tabelas complexas
         if table_name in ODOO_COMPLEX_TABLES:
             if ODOO_COMPLEX_TABLES[table_name].get('skip_sample_data', False):
                 return False
-        
+
         # Inclui amostrar apenas para tabelas importantes
         category = self._identify_table_category(table_name)
         return category in ["main_business", "transactional"]
-    
+
     def get_all_tables(self) -> List[str]:
         """Retorna lista de todas as tabelas no banco de dados"""
         return self.inspector.get_table_names()
-    
+
     def get_table_columns(self, table_name: str) -> List[Dict[str, Any]]:
         """Retorna informações sobre colunas de uma tabela"""
         return self.inspector.get_columns(table_name)
-    
+
     def get_primary_keys(self, table_name: str) -> List[str]:
         """Retorna chaves primárias de uma tabela"""
         try:
             return self.inspector.get_pk_constraint(table_name)['constrained_columns']
         except:
             return []
-    
+
     def get_foreign_keys(self, table_name: str) -> List[Dict[str, Any]]:
         """Retorna chaves estrangeiras de uma tabela"""
         return self.inspector.get_foreign_keys(table_name)
-    
+
     def get_table_create_statement(self, table_name: str) -> str:
         """Retorna o comando CREATE TABLE para uma tabela"""
         try:
@@ -250,31 +250,31 @@ class SchemaExtractor:
             if table is None:
                 table = self.metadata.reflect(self.engine, only=[table_name])
                 table = self.metadata.tables.get(table_name)
-            
+
             if table:
                 return str(CreateTable(table).compile(self.engine))
             return f"CREATE TABLE {table_name} (...)"
         except Exception as e:
             return f"CREATE TABLE {table_name} (...) -- Erro: {str(e)}"
-    
+
     def get_table_indexes(self, table_name: str) -> List[Dict[str, Any]]:
         """Retorna índices de uma tabela"""
         # Verifica se devemos pular índices para esta tabela
         if table_name in SPECIAL_TABLES and SPECIAL_TABLES[table_name].get('skip_indexes', False):
             return []
-        
+
         try:
             return self.inspector.get_indexes(table_name)
         except Exception as e:
             print(f"Erro ao obter índices da tabela {table_name}: {str(e)}")
             return []
-        
+
     def _json_serializable_converter(self, obj):
         """Converte tipos não serializáveis para formatos compatíveis com JSON"""
         import pandas as pd
         import numpy as np
         from datetime import datetime, date
-    
+
         # Converte tipos de data/hora
         if isinstance(obj, (pd.Timestamp, datetime, date)):
             return obj.isoformat()
@@ -301,7 +301,7 @@ class SchemaExtractor:
         # Verifica se devemos incluir amostras para esta tabela
         if not self._should_include_sample_data(table_name):
             return pd.DataFrame()
-        
+
         if table_name in PROBLEMATIC_TABLES:
             # Trata palavras reservadas
             reserved_words = PROBLEMATIC_TABLES[table_name].get('reserved_words', [])
@@ -318,14 +318,14 @@ class SchemaExtractor:
                 except Exception as e:
                     print(f"Erro ao obter amostra da tabela {table_name}: {str(e)}")
                     return pd.DataFrame()
-        
+
         try:
             query = f"SELECT * FROM {table_name} LIMIT {sample_size}"
             return pd.read_sql(query, self.engine)
         except Exception as e:
             print(f"Erro ao obter amostra da tabela {table_name}: {str(e)}")
             return pd.DataFrame()
-    
+
     def generate_rich_table_info(self, table_name: str) -> Dict[str, Any]:
         """Gera informações detalhadas sobre uma tabela com tratamento especial"""
         table_info = {
@@ -357,13 +357,13 @@ class SchemaExtractor:
             table_info["sample_data"] = []
 
         return table_info
-    
+
     def format_table_info_for_embedding(self, table_info: Dict[str, Any]) -> str:
         """Formata informações da tabela para embedding"""
         table_name = table_info["table_name"]
         category = table_info.get("category", "unknown")
         module = table_info.get("module", "unknown")
-        
+
         # Formata informações sobre colunas
         column_info = []
         for col in table_info.get("columns", []):
@@ -373,7 +373,7 @@ class SchemaExtractor:
             pk_str = " (PRIMARY KEY)" if is_pk else ""
             col_str = f"- {col.get('name', 'Unknown')}: {col.get('type', 'Unknown')}{pk_str}"
             column_info.append(col_str)
-        
+
         # Formata informações sobre chaves estrangeiras
         fk_info = []
         for fk in table_info.get("foreign_keys", []):
@@ -385,29 +385,29 @@ class SchemaExtractor:
             if fk_cols and ref_cols:
                 fk_str = f"- Foreign Key: {fk_cols} -> {ref_table}.{ref_cols}"
                 fk_info.append(fk_str)
-        
+
         # Informações sobre índices com tratamento para None
         index_info = []
         for idx in table_info.get("indexes", []):
             if not isinstance(idx, dict):
                 continue
-            
+
             # Trata column_names None ou vazios
             column_names = idx.get("column_names", [])
             if column_names is None:
                 column_names = []
             elif isinstance(column_names, str):
                 column_names = [column_names]
-            
+
             # Filtra apenas nomes de colunas válidos
             valid_columns = [str(col) for col in column_names if col is not None]
-            
+
             if valid_columns:  # Só adiciona o índice se tiver colunas válidas
                 idx_cols = ", ".join(valid_columns)
                 idx_type = "UNIQUE " if idx.get("unique", False) else ""
                 idx_str = f"- {idx_type}Index on ({idx_cols})"
                 index_info.append(idx_str)
-        
+
         # Amostra de dados (primeiras linhas)
         sample_data_str = ""
         sample_data = table_info.get("sample_data", [])
@@ -416,7 +416,7 @@ class SchemaExtractor:
             for i, row in enumerate(sample_data):
                 if isinstance(row, dict):
                     sample_data_str += f"Exemplo {i+1}: {row}\n"
-        
+
         # Monta o documento final com verificações de existência
         formatted_text = f"""
 TABLE: {table_name}
@@ -435,22 +435,22 @@ INDEXES:
 {sample_data_str}
 """
         return formatted_text
-    
+
     def generate_module_info(self) -> List[Document]:
         """Gera documentos com informações sobre os módulos do Odoo"""
         if not self.is_odoo:
             return []
-        
+
         # Agrupar tabelas por módulo
         module_tables = {}
         all_tables = self.get_all_tables()
-        
+
         for table in all_tables:
             module = self._infer_odoo_module(table)
             if module not in module_tables:
                 module_tables[module] = []
             module_tables[module].append(table)
-        
+
         documents = []
         for module, tables in module_tables.items():
             # Conta tabelas por categoria neste módulo
@@ -460,7 +460,7 @@ INDEXES:
                 if category not in category_counts:
                     category_counts[category] = 0
                 category_counts[category] += 1
-            
+
             # Formata o conteúdo com informações do módulo
             content = f"""
 MODULE: {module}
@@ -474,39 +474,39 @@ MAIN TABLES:
 ALL TABLES:
 {', '.join(tables)}
 """
-            
+
             doc = Document(
                 page_content=content,
                 metadata={
-                    "type": "module", 
+                    "type": "module",
                     "module": module,
                     "table_count": len(tables)
                 }
             )
             documents.append(doc)
-        
+
         return documents
-    
+
     def generate_schema_overview(self) -> Document:
         """Gera um documento de visão geral do esquema"""
         all_tables = self.get_all_tables()
-        
+
         # Conta tabelas por categoria e módulo
         categories = {}
         modules = {}
-        
+
         for table in all_tables:
             category = self._identify_table_category(table)
             module = self._infer_odoo_module(table)
-            
+
             if category not in categories:
                 categories[category] = 0
             categories[category] += 1
-            
+
             if module not in modules:
                 modules[module] = 0
             modules[module] += 1
-        
+
         content = f"""
 DATABASE SCHEMA OVERVIEW
 Total Tables: {len(all_tables)}
@@ -521,12 +521,12 @@ MODULES:
 IMPORTANT BUSINESS TABLES:
 {chr(10).join([f"- {table}" for table in all_tables if self._is_important_table(table)][:20])}
 """
-        
+
         return Document(
             page_content=content,
             metadata={"type": "schema_overview"}
         )
-    
+
     def extract_table_structure_document(self, table_name: str) -> Document:
         """Extrai documento apenas com a estrutura da tabela (sem amostras)"""
         # Obtém informações de estrutura da tabela
@@ -535,7 +535,7 @@ IMPORTANT BUSINESS TABLES:
         foreign_keys = self.get_foreign_keys(table_name)
         category = self._identify_table_category(table_name)
         module = self._infer_odoo_module(table_name)
-        
+
         # Formata as colunas
         column_info = []
         for col in columns:
@@ -543,7 +543,7 @@ IMPORTANT BUSINESS TABLES:
             pk_str = " (PRIMARY KEY)" if is_pk else ""
             col_str = f"- {col.get('name', 'Unknown')}: {str(col.get('type', 'Unknown'))}{pk_str}"
             column_info.append(col_str)
-        
+
         # Formata as chaves estrangeiras
         fk_info = []
         for fk in foreign_keys:
@@ -553,7 +553,7 @@ IMPORTANT BUSINESS TABLES:
             if fk_cols and ref_cols:
                 fk_str = f"- {fk_cols} -> {ref_table}.{ref_cols}"
                 fk_info.append(fk_str)
-        
+
         # Formata o conteúdo
         content = f"""
 TABLE: {table_name}
@@ -566,7 +566,7 @@ COLUMNS:
 RELATIONSHIPS:
 {chr(10).join(fk_info) if fk_info else '-- Nenhuma chave estrangeira'}
 """
-        
+
         return Document(
             page_content=content,
             metadata={
@@ -576,7 +576,7 @@ RELATIONSHIPS:
                 "module": module
             }
         )
-    
+
     # Em seguida, modifique a função extract_table_data_document para usar o conversor:
 
     def extract_table_data_document(self, table_name: str, sample_size: int = 3) -> Optional[Document]:
@@ -584,22 +584,22 @@ RELATIONSHIPS:
         # Verifica se devemos incluir amostras para esta tabela
         if not self._should_include_sample_data(table_name):
             return None
-    
+
         try:
             sample_data = self.get_table_sample_data(table_name, sample_size)
             if sample_data.empty:
                 return None
-        
+
             # Converte o DataFrame para dict e então para JSON usando o conversor personalizado
             records = sample_data.to_dict(orient='records')
-        
+
             # Formata o conteúdo
             content = f"""
 TABLE DATA SAMPLES: {table_name}
 
 {chr(10).join([f"Row {i+1}: {json.dumps(row, default=self._json_serializable_converter)}" for i, row in enumerate(records)])}
 """
-        
+
             return Document(
                 page_content=content,
                 metadata={
@@ -611,37 +611,37 @@ TABLE DATA SAMPLES: {table_name}
         except Exception as e:
             print(f"Erro ao extrair dados da tabela {table_name}: {str(e)}")
             return None
-    
+
     def extract_all_tables_info(self) -> List[Document]:
         """Extrai informações de todas as tabelas com estratégia otimizada"""
         all_tables = self.get_all_tables()
         documents = []
-        
+
         # Adiciona documento de visão geral
         documents.append(self.generate_schema_overview())
-        
+
         # Adiciona documentos de módulos (se for Odoo)
         if self.is_odoo:
             module_docs = self.generate_module_info()
             documents.extend(module_docs)
-        
+
         # Filtra tabelas por importância e processa primeiro as mais importantes
         important_tables = [t for t in all_tables if self._is_important_table(t)]
         other_tables = [t for t in all_tables if t not in important_tables and not self._should_skip_table(t)]
-        
+
         print(f"Processando {len(important_tables)} tabelas importantes")
         for table in important_tables:
             print(f"Processando tabela importante: {table}")
-            
+
             # Adiciona documento de estrutura
             structure_doc = self.extract_table_structure_document(table)
             documents.append(structure_doc)
-            
+
             # Adiciona documento de dados (se aplicável)
             data_doc = self.extract_table_data_document(table)
             if data_doc:
                 documents.append(data_doc)
-        
+
         # Processa tabelas secundárias (apenas estrutura)
         print(f"Processando {len(other_tables)} tabelas secundárias")
         batch_size = 50
@@ -651,18 +651,18 @@ TABLE DATA SAMPLES: {table_name}
                 print(f"Processando tabela secundária: {table}")
                 structure_doc = self.extract_table_structure_document(table)
                 documents.append(structure_doc)
-        
+
         # Para tabelas que devem ser ignoradas, adiciona documento mínimo
         skipped_tables = [t for t in all_tables if self._should_skip_table(t)]
         print(f"Adicionando {len(skipped_tables)} tabelas ignoradas como referência mínima")
-        
+
         for table in skipped_tables:
             minimal_doc = Document(
                 page_content=f"TABLE: {table}\nNote: Esta é uma tabela técnica ou complexa que requer tratamento especial.",
                 metadata={"table_name": table, "type": "minimal_reference"}
             )
             documents.append(minimal_doc)
-        
+
         return documents
 
 # --- Classe de Callback para Capturar a Query SQL ---
@@ -683,7 +683,7 @@ class SQLQueryCaptureCallback(BaseCallbackHandler):
         if tool_name in ['sql_db_query', 'query-sql', 'sql_db_query_checker']:
             # Registra o tempo de início
             self.start_time = time.time()
-            
+
             # O input_str pode ser a query diretamente ou um JSON stringificado
             potential_query = None
             try:
@@ -702,7 +702,7 @@ class SQLQueryCaptureCallback(BaseCallbackHandler):
             if potential_query and isinstance(potential_query, str) and "SELECT" in potential_query.upper():
                 self.sql_query = potential_query
                 print(f"--- Callback: Query SQL capturada: {self.sql_query} ---") # Log no console
-    
+
     def on_tool_end(self, output: str, **kwargs: Any) -> Any:
         """Called when the tool finishes running."""
         if self.start_time is not None:
@@ -712,7 +712,7 @@ class SQLQueryCaptureCallback(BaseCallbackHandler):
     def get_captured_query(self) -> Optional[str]:
         """Returns the captured SQL query."""
         return self.sql_query
-    
+
     def get_execution_time(self) -> Optional[float]:
         """Returns the query execution time if available."""
         return self.exec_time
@@ -724,20 +724,41 @@ class SQLQueryCaptureCallback(BaseCallbackHandler):
         self.exec_time = None
 
 class OdooTextToSQL:
-    """Classe principal otimizada para processamento de consultas text-to-SQL em bancos Odoo"""
-    
-    def __init__(self, db_uri: str, use_checkpoint: bool = True, force_reprocess: bool = False, 
+    """Classe principal otimizada para processamento de consultas text-to-SQL em bancos Odoo
+
+    Esta classe implementa um agente SQL que converte perguntas em linguagem natural para consultas SQL.
+    Utiliza técnicas avançadas como:
+    - Embeddings para identificar tabelas relevantes
+    - Exemplos few-shot para melhorar a precisão das consultas geradas
+    - Cache de resultados para otimizar performance
+    - Callbacks para capturar as consultas SQL geradas
+
+    Os exemplos few-shot são utilizados para ensinar ao modelo como gerar consultas SQL para perguntas
+    comuns em um banco de dados Odoo ERP. Estes exemplos são combinados com o prefixo de segurança
+    para criar um prompt mais eficaz para o agente SQL.
+    """
+
+    def __init__(self, db_uri: str, use_checkpoint: bool = True, force_reprocess: bool = False,
                 data_dir: Optional[str] = None, enable_llm_cache: bool = True):
+        """Inicializa o agente SQL com configurações personalizadas
+
+        Args:
+            db_uri: URI de conexão com o banco de dados
+            use_checkpoint: Se deve usar checkpoints salvos para embeddings
+            force_reprocess: Se deve forçar o reprocessamento dos embeddings
+            data_dir: Diretório para armazenar dados e checkpoints
+            enable_llm_cache: Se deve habilitar cache para chamadas ao LLM
+        """
         config = Config()
         self.db_uri = db_uri
         self.use_checkpoint = use_checkpoint
         self.force_reprocess = force_reprocess
-        
+
         # Configuração do diretório de dados
         self.data_dir = data_dir or os.environ.get('SQL_AGENT_DATA_DIR', 'data')
         # Cria o diretório base se não existir
         os.makedirs(self.data_dir, exist_ok=True)
-        
+
         self.schema_extractor = SchemaExtractor(db_uri)
         self.embeddings = OpenAIEmbeddings(api_key=config.openai_api_key)
 
@@ -747,10 +768,10 @@ class OdooTextToSQL:
                 # Cria um engine SQLite para o cache no diretório de dados
                 cache_path = os.path.join(self.data_dir, 'llm_cache.sqlite')
                 cache_engine = create_engine(f"sqlite:///{cache_path}")
-                
+
                 # Configura o SQLAlchemyCache apenas com o engine
                 self.llm_cache = SQLAlchemyCache(cache_engine)
-                
+
                 # Configura o cache global para LangChain
                 set_llm_cache(self.llm_cache)
                 print(f"Cache LLM SQLite configurado em: {cache_path}")
@@ -763,18 +784,21 @@ class OdooTextToSQL:
             model_name=config.model_name,
             api_key=config.openai_api_key
         )
-        
+
         self.db = SQLDatabase.from_uri(db_uri)
         self.vector_store = self._get_or_create_schema_embeddings()
         self.toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
 
-        # --- Usa o prefixo importado ---
+        # Combina o prefixo de segurança com os exemplos few-shot
+        combined_prefix = f"{SAFETY_PREFIX}\n\n{FEW_SHOT_EXAMPLES}"
+
+        # --- Usa o prefixo combinado com exemplos few-shot ---
         self.agent = create_sql_agent(
             llm=self.llm,
             toolkit=self.toolkit,
             verbose=True,
             agent_type="openai-tools",
-            prefix=SAFETY_PREFIX  # Usa a constante importada
+            prefix=combined_prefix  # Usa a combinação de prefixo de segurança e exemplos
         )
         # Instancia o callback handler
         self.query_callback_handler = SQLQueryCaptureCallback()
@@ -786,42 +810,42 @@ class OdooTextToSQL:
         try:
             schema_hash = self._generate_schema_hash()
             checkpoint_dir = os.path.join(self.data_dir, 'checkpoints', f"schema_{schema_hash}")
-            
+
             # Cria o diretório de checkpoint se não existir
             os.makedirs(checkpoint_dir, exist_ok=True)
-            
+
             # Inicializa o client do Chroma
             embedding_function = self.embeddings
-            
+
             if os.path.exists(os.path.join(checkpoint_dir, "chroma.sqlite3")) and not self.force_reprocess:
                 print(f"Carregando embeddings do checkpoint: {checkpoint_dir}")
                 return Chroma(
                     persist_directory=checkpoint_dir,
                     embedding_function=embedding_function
                 )
-            
+
             print(f"Gerando novos embeddings do schema em: {checkpoint_dir}")
             documents = self.schema_extractor.extract_all_tables_info()
-            
+
             print(f"Total de documentos a serem incorporados: {len(documents)}")
-            
+
             # Cria nova instância do Chroma
             vectorstore = Chroma(
                 persist_directory=checkpoint_dir,
                 embedding_function=embedding_function
             )
-            
+
             # Adiciona documentos em lotes para melhor performance e feedback
             batch_size = 50
             for i in range(0, len(documents), batch_size):
                 batch = documents[i:i+batch_size]
                 ids = [f"doc_{i+j}" for j in range(len(batch))]
-                
+
                 # Adiciona o lote com IDs explícitos
                 vectorstore.add_documents(documents=batch, ids=ids)
-                
+
                 print(f"Processado lote {i//batch_size + 1}/{(len(documents)-1)//batch_size + 1} ({i+len(batch)}/{len(documents)} documentos)")
-            
+
             print("Embeddings do schema concluídos e salvos.")
             return vectorstore
         except Exception as e:
@@ -836,10 +860,10 @@ class OdooTextToSQL:
         """Gera um hash representando o estado atual do schema com foco nas tabelas principais"""
         # Obtém lista de todas as tabelas
         all_tables = self.schema_extractor.get_all_tables()
-        
+
         # Seleciona apenas tabelas importantes para o hash
         important_tables = [t for t in all_tables if self.schema_extractor._is_important_table(t)]
-        
+
         # Para cada tabela importante, coleta informações essenciais para o hash
         schema_info = {}
         for table in important_tables:
@@ -847,10 +871,10 @@ class OdooTextToSQL:
                 columns = self.schema_extractor.get_table_columns(table)
                 primary_keys = self.schema_extractor.get_primary_keys(table)
                 foreign_keys = self.schema_extractor.get_foreign_keys(table)
-            
+
                 # Simplifica para incluir apenas o essencial
                 col_info = [(col["name"], str(col["type"])) for col in columns]
-            
+
                 schema_info[table] = {
                     "columns": col_info,
                     "primary_keys": primary_keys,
@@ -859,49 +883,66 @@ class OdooTextToSQL:
             except Exception as e:
                 print(f"Erro ao processar tabela {table} para hash: {str(e)}")
                 continue
-    
+
         # Converte para string e gera hash
         schema_str = json.dumps(schema_info, sort_keys=True)
         return hashlib.md5(schema_str.encode()).hexdigest()
-    
+
     def find_relevant_tables(self, query: str, top_k: int = 7) -> List[str]:
-        """Encontra tabelas relevantes para a consulta com abordagem hierárquica"""
+        """Encontra tabelas relevantes para a consulta com abordagem hierárquica
+
+        Utiliza uma estratégia de busca em múltiplas camadas para identificar as tabelas
+        mais relevantes para a consulta do usuário:
+        1. Busca documentos de visão geral e módulos para contexto
+        2. Busca documentos de estrutura de tabelas (principal fonte)
+        3. Busca documentos de dados de tabelas (complemento)
+        4. Se necessário, faz uma busca genérica para garantir resultados
+
+        Args:
+            query: Pergunta do usuário em linguagem natural
+            top_k: Número máximo de tabelas a retornar
+
+        Returns:
+            Lista de nomes de tabelas relevantes para a consulta
+        """
         # Primeiro, busca documentos de visão geral e módulos
-        docs_overview = self.vector_store.similarity_search(
-            query, 
+        # Estes documentos ajudam a entender o contexto, mas não são usados diretamente
+        # para extrair nomes de tabelas
+        self.vector_store.similarity_search(
+            query,
             k=3,
             filter={"type": {"$in": ["schema_overview", "module"]}}
         )
-        
+
         # Em seguida, busca documentos de estrutura de tabelas
         docs_structure = self.vector_store.similarity_search(
-            query, 
+            query,
             k=top_k,
             filter={"type": "table_structure"}
         )
-        
+
         # Por fim, busca documentos de dados de tabelas
         docs_data = self.vector_store.similarity_search(
-            query, 
+            query,
             k=3,
             filter={"type": "table_data"}
         )
-        
+
         # Extrai nomes de tabelas únicos de todos os resultados
         tables = []
-        
+
         # Adiciona tabelas de documentos de estrutura (principal fonte)
         for doc in docs_structure:
             table_name = doc.metadata.get("table_name")
             if table_name and table_name not in tables:
                 tables.append(table_name)
-        
+
         # Adiciona tabelas de documentos de dados (complemento)
         for doc in docs_data:
             table_name = doc.metadata.get("table_name")
             if table_name and table_name not in tables:
                 tables.append(table_name)
-        
+
         # Se temos menos que 3 tabelas, busca documentos genéricos
         if len(tables) < 3:
             docs_generic = self.vector_store.similarity_search(query, k=top_k)
@@ -909,35 +950,35 @@ class OdooTextToSQL:
                 table_name = doc.metadata.get("table_name")
                 if table_name and table_name not in tables:
                     tables.append(table_name)
-        
+
         return tables[:top_k]  # Limita ao número máximo de tabelas
 
     def get_table_relationships(self, tables: List[str]) -> Dict[str, List[str]]:
         """Identifica relacionamentos entre as tabelas relevantes"""
         relationships = {}
-        
+
         for table in tables:
             related_tables = []
-            
+
             # Busca chaves estrangeiras que saem desta tabela
             foreign_keys = self.schema_extractor.get_foreign_keys(table)
             for fk in foreign_keys:
                 referred_table = fk.get("referred_table")
                 if referred_table and referred_table in tables and referred_table != table:
                     related_tables.append(referred_table)
-            
+
             # Busca tabelas que se referem a esta tabela
             for other_table in tables:
                 if other_table == table:
                     continue
-                    
+
                 other_fks = self.schema_extractor.get_foreign_keys(other_table)
                 for fk in other_fks:
                     if fk.get("referred_table") == table:
                         related_tables.append(other_table)
-            
+
             relationships[table] = list(set(related_tables))  # Remove duplicatas
-        
+
         return relationships
 
     def enhance_query_with_table_info(self, query: str, tables: List[str]) -> str:
@@ -947,25 +988,33 @@ class OdooTextToSQL:
         for table in tables:
             table_info = self.schema_extractor.extract_table_structure_document(table)
             table_structures.append(table_info.page_content)
-        
+
         # Obtém relacionamentos entre as tabelas
         relationships = self.get_table_relationships(tables)
         relationship_info = []
-        
+
         for table, related_tables in relationships.items():
             if related_tables:
                 rel_str = f"Tabela {table} relaciona-se com: {', '.join(related_tables)}"
                 relationship_info.append(rel_str)
-        
+
         # Coleta amostras de dados apenas para tabelas principais (no máximo 3)
         sample_data_info = []
-        important_tables = [t for t in tables if self.schema_extractor._is_important_table(t)][:3]
-        
+        # Filtra tabelas importantes usando um método público
+        important_tables = []
+        for table in tables:
+            # Verifica se é uma tabela importante usando a categoria
+            category = self.schema_extractor._identify_table_category(table)
+            if category in ["main_business", "transactional"]:
+                important_tables.append(table)
+                if len(important_tables) >= 3:
+                    break
+
         for table in important_tables:
             data_doc = self.schema_extractor.extract_table_data_document(table)
             if data_doc:
                 sample_data_info.append(data_doc.page_content)
-        
+
         # Determina se é um banco Odoo para adicionar contexto específico
         odoo_context = ""
         if self.schema_extractor.is_odoo:
@@ -1045,7 +1094,7 @@ class OdooTextToSQL:
             - stock_picking.state: 'draft', 'waiting', 'confirmed', 'assigned', 'done', 'cancel'
             - account_move.state: 'draft', 'posted', 'cancel'
             """
-        
+
         # Cria prompt enriquecido
         enhanced_query = f"""
 Pergunta: {query}
@@ -1061,18 +1110,18 @@ Relacionamentos entre tabelas:
 
 {chr(10).join(sample_data_info) if sample_data_info else ""}
 
-Por favor, gere uma consulta SQL que responda à pergunta usando estas tabelas. 
+Por favor, gere uma consulta SQL que responda à pergunta usando estas tabelas.
 Use joins quando apropriado e prefira JOINs explícitos (ex: INNER JOIN) em vez de junções na cláusula WHERE.
 Inclua aliases de tabela para melhorar a legibilidade.
 """
         return enhanced_query
-    
+
     def get_query_from_cache(self, question: str) -> Optional[Dict[str, Any]]:
         """Verifica se há resultado em cache para a pergunta"""
         # Usamos uma chave simplificada para maximizar chance de cache hit
         question_key = question.lower().strip()
         return self.query_cache.get(question_key)
-    
+
     def add_query_to_cache(self, question: str, result: Dict[str, Any], query: Optional[str]):
         """Adiciona o resultado e query ao cache"""
         question_key = question.lower().strip()
@@ -1081,50 +1130,79 @@ Inclua aliases de tabela para melhorar a legibilidade.
             'query': query,
             'timestamp': time.time()
         }
-    
-    def query(self, user_question: str) -> Tuple[Dict[str, Any], Optional[str]]:
+
+    def get_few_shot_examples(self) -> str:
+        """Retorna os exemplos few-shot utilizados pelo agente SQL
+
+        Os exemplos few-shot são utilizados para melhorar a precisão das consultas SQL geradas.
+        Cada exemplo consiste em uma pergunta em linguagem natural e a consulta SQL correspondente.
+        Estes exemplos ajudam o modelo a entender o padrão de consultas esperado para o banco Odoo.
+
+        Returns:
+            String contendo os exemplos few-shot formatados
         """
-        Processa pergunta do usuário, captura a query SQL via callback,
-        e retorna o resultado do agente e a query capturada.
+        return FEW_SHOT_EXAMPLES
+
+    def query(self, user_question: str) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Processa pergunta do usuário e gera consulta SQL
+
+        Este método implementa o fluxo completo de processamento:
+        1. Verifica cache para resultados existentes
+        2. Identifica tabelas relevantes para a consulta
+        3. Enriquece a pergunta com informações de schema
+        4. Executa o agente SQL com exemplos few-shot
+        5. Captura a consulta SQL gerada via callback
+        6. Armazena o resultado em cache para uso futuro
+
+        O uso de exemplos few-shot melhora significativamente a qualidade das consultas geradas,
+        especialmente para perguntas complexas que envolvem múltiplas tabelas e joins.
+
+        Args:
+            user_question: Pergunta do usuário em linguagem natural
+
+        Returns:
+            Tupla contendo o resultado do agente e a consulta SQL capturada
         """
         # Verifica primeiro o cache
         cached_data = self.get_query_from_cache(user_question)
         if cached_data:
             print("Usando resultado em cache")
             return cached_data['result'], cached_data['query']
-        
+
         # Reseta o callback antes de cada consulta
         self.query_callback_handler.reset()
-        
+
         # Encontra tabelas relevantes para a consulta
         relevant_tables = self.find_relevant_tables(user_question)
         print(f"Tabelas relevantes: {', '.join(relevant_tables)}")
-        
+
         # Enriquece a pergunta com informações de schema
         enhanced_question = self.enhance_query_with_table_info(user_question, relevant_tables)
-        
+
         # Registra tempo de início
         start_time = time.time()
-        
+
         # Executa o agente passando o callback handler
+        # O agente utiliza os exemplos few-shot definidos na inicialização
         result = self.agent.invoke(
             {"input": enhanced_question},
             config={"callbacks": [self.query_callback_handler]} # Passa o handler aqui
         )
-        
+
         # Registra tempo de execução total
         exec_time = time.time() - start_time
         print(f"Tempo total de processamento: {exec_time:.2f}s")
-        
+
         # Obtém a query capturada pelo callback
         captured_query = self.query_callback_handler.get_captured_query()
         query_exec_time = self.query_callback_handler.get_execution_time()
-        
+
         if query_exec_time:
             print(f"Tempo de execução da query: {query_exec_time:.2f}s")
-        
+
         # Adiciona ao cache
         self.add_query_to_cache(user_question, result, captured_query)
-        
+
         # Retorna tanto o resultado quanto a query capturada
-        return result, captured_query            
+        return result, captured_query
+
