@@ -18,11 +18,13 @@ from .config import Config
 # Importações adicionadas para Callbacks
 from langchain.callbacks.base import BaseCallbackHandler
 # --- Importa os prompts do arquivo prompts.py ---
-from .prompts import SAFETY_PREFIX, FEW_SHOT_EXAMPLES
+from .prompts import SAFETY_PREFIX, FEW_SHOT_EXAMPLES, QUERY_CHECKER
 import time
 from langchain_community.cache import SQLAlchemyCache
 from langchain.globals import set_llm_cache
 import datetime
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
 
 # Constantes e configurações
 ODOO_COMPLEX_TABLES = {
@@ -723,6 +725,109 @@ class SQLQueryCaptureCallback(BaseCallbackHandler):
         self.start_time = None
         self.exec_time = None
 
+
+class QuerySQLCheckerTool:
+    """Ferramenta para verificar e validar consultas SQL antes da execução.
+
+    Esta ferramenta usa um LLM para verificar se uma consulta SQL contém erros comuns
+    ou comandos potencialmente perigosos antes de executá-la no banco de dados.
+
+    Adaptado de: https://www.patterns.app/blog/2023/01/18/crunchbot-sql-analyst-gpt/
+    """
+
+    def __init__(self, llm: ChatOpenAI, db: SQLDatabase):
+        """Inicializa o validador de consultas SQL.
+
+        Args:
+            llm: Modelo de linguagem para verificar as consultas
+            db: Banco de dados SQL para obter informações sobre o dialeto
+        """
+        self.llm = llm
+        self.db = db
+
+        # Cria o prompt para validação de consultas SQL
+        self.prompt = PromptTemplate(
+            template=QUERY_CHECKER,
+            input_variables=["dialect", "query"]
+        )
+
+        # Cria a sequência de execução usando a nova abordagem recomendada
+        # prompt | llm em vez de LLMChain
+        self.chain = self.prompt | self.llm
+
+    def validate_query(self, query: str) -> Tuple[bool, str]:
+        """Valida uma consulta SQL usando o LLM.
+
+        Args:
+            query: A consulta SQL a ser validada
+
+        Returns:
+            Tupla contendo (is_valid, result_or_error)
+            - is_valid: True se a consulta for válida, False caso contrário
+            - result_or_error: A consulta corrigida ou uma mensagem de erro
+        """
+        try:
+            # Verifica se a consulta contém comandos não permitidos
+            dangerous_commands = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE"]
+            for cmd in dangerous_commands:
+                if cmd in query.upper():
+                    return False, f"Erro: Consulta contém comando não permitido: {cmd}. Apenas consultas SELECT são permitidas."
+
+            # Verifica se a consulta é complexa (contém CTEs ou subconsultas)
+            is_complex_query = "WITH" in query.upper() or query.upper().count("SELECT") > 1
+
+            # Para consultas complexas, fazemos uma validação mais simples para evitar truncamento
+            if is_complex_query:
+                print("Detectada consulta complexa com CTEs ou subconsultas")
+
+                # Verifica apenas se a consulta começa com SELECT ou WITH
+                if query.upper().strip().startswith("SELECT") or query.upper().strip().startswith("WITH"):
+                    # Verifica se a consulta parece completa (tem ponto e vírgula no final ou não termina abruptamente)
+                    if query.strip().endswith(";") or query.strip().endswith(")"):
+                        print("Consulta complexa validada sem modificações")
+                        return True, query
+
+                # Se a consulta não parece estar completa, tenta validar normalmente
+                print("Consulta complexa pode estar incompleta, tentando validação completa")
+
+            # Usa o LLM para verificar e corrigir a consulta
+            result = self.chain.invoke({
+                "query": query,
+                "dialect": self.db.dialect
+            }).content
+
+            # Verifica se o resultado é muito curto comparado com a consulta original
+            # Isso pode indicar que o LLM truncou a resposta
+            if len(result) < len(query) * 0.5 and is_complex_query:
+                print("Possível truncamento detectado na validação. Mantendo consulta original.")
+                return True, query
+
+            # Se o resultado for diferente da consulta original, considera que houve correção
+            if result.strip() != query.strip():
+                print(f"--- Consulta corrigida pelo validador ---")
+                print(f"Original: {query}")
+                print(f"Corrigida: {result}")
+
+                # Verifica se a correção manteve a estrutura básica da consulta
+                if is_complex_query and "WITH" in query.upper() and "WITH" not in result.upper():
+                    print("A correção removeu a estrutura CTE. Mantendo consulta original.")
+                    return True, query
+
+                return True, result
+
+            # Se não houve alteração, a consulta é válida
+            return True, query
+
+        except Exception as e:
+            print(f"Erro na validação: {str(e)}")
+            # Em caso de erro na validação, preferimos manter a consulta original
+            # para consultas complexas, em vez de falhar completamente
+            if "WITH" in query.upper() or query.upper().count("SELECT") > 1:
+                print("Erro ao validar consulta complexa. Mantendo consulta original.")
+                return True, query
+            return False, f"Erro ao validar consulta: {str(e)}"
+
+
 class OdooTextToSQL:
     """Classe principal otimizada para processamento de consultas text-to-SQL em bancos Odoo
 
@@ -804,6 +909,8 @@ class OdooTextToSQL:
         self.query_callback_handler = SQLQueryCaptureCallback()
         # Cache para resultados de consultas
         self.query_cache = {}
+        # Inicializa o validador de consultas SQL
+        self.query_checker = QuerySQLCheckerTool(llm=self.llm, db=self.db)
 
     def _get_or_create_schema_embeddings(self) -> Chroma:
         """Cria ou recupera embeddings do schema do banco com estratégia otimizada"""
@@ -1200,9 +1307,80 @@ Inclua aliases de tabela para melhorar a legibilidade.
         if query_exec_time:
             print(f"Tempo de execução da query: {query_exec_time:.2f}s")
 
-        # Adiciona ao cache
-        self.add_query_to_cache(user_question, result, captured_query)
+        # Primeiro, verifica se a consulta corresponde a algum dos exemplos few-shot
+        # Se corresponder, usamos a consulta do exemplo diretamente sem validação
+        is_from_few_shot = False
+        for example in FEW_SHOT_EXAMPLES.split("SQL:"):
+            if len(example.strip()) > 0 and "```sql" in example:
+                # Extrai a consulta SQL do exemplo
+                sql_part = example.split("```sql")[1].split("```")[0].strip()
 
-        # Retorna tanto o resultado quanto a query capturada
-        return result, captured_query
+                # Verifica se a pergunta do usuário corresponde a este exemplo
+                question_part = example.split("Pergunta:")[1].split("SQL:")[0].strip() if "Pergunta:" in example else ""
+
+                if question_part and user_question.lower().strip() == question_part.lower().strip():
+                    print(f"Encontrado exemplo few-shot correspondente à pergunta")
+                    captured_query = sql_part
+                    is_from_few_shot = True
+                    break
+
+                # Verifica se a consulta capturada é idêntica ou muito similar à consulta do exemplo
+                if captured_query and (captured_query.strip() == sql_part.strip() or
+                                      (len(captured_query) > 50 and sql_part.strip().startswith(captured_query.strip()[:50]))):
+                    print(f"Consulta capturada corresponde a um exemplo few-shot")
+                    captured_query = sql_part
+                    is_from_few_shot = True
+                    break
+
+                # Verifica se a consulta capturada é um fragmento da consulta do exemplo
+                if captured_query and captured_query in sql_part:
+                    print(f"Consulta capturada parece ser um fragmento de um exemplo few-shot")
+                    captured_query = sql_part
+                    is_from_few_shot = True
+                    break
+
+        # Se não for de um exemplo few-shot, verifica se é uma consulta complexa
+        if not is_from_few_shot and captured_query:
+            is_complex_query = ("WITH" in captured_query.upper() or captured_query.upper().count("SELECT") > 1)
+
+            if is_complex_query:
+                print("Detectada consulta complexa com CTEs ou subconsultas")
+
+                # Verifica se a consulta parece estar completa
+                if not (captured_query.strip().endswith(";") or captured_query.strip().endswith(")")):
+                    print("Consulta complexa pode estar incompleta, verificando...")
+
+        # Valida a consulta SQL antes de retornar, exceto se for de um exemplo few-shot
+        if captured_query:
+            if is_from_few_shot:
+                print("Consulta é de um exemplo few-shot, pulando validação")
+                final_query = captured_query
+            else:
+                print("Validando consulta SQL...")
+                is_valid, validated_query = self.query_checker.validate_query(captured_query)
+
+                if not is_valid:
+                    print(f"ERRO DE VALIDAÇÃO: {validated_query}")
+                    # Se a consulta for inválida, adiciona o erro ao resultado
+                    if isinstance(result, dict) and "output" in result:
+                        result["output"] += f"\n\nERRO DE VALIDAÇÃO: {validated_query}"
+                    # Retorna a consulta original para referência
+                    final_query = captured_query
+                else:
+                    print("Consulta validada com sucesso!")
+                    # Se a consulta foi corrigida, usa a versão corrigida
+                    final_query = validated_query
+
+                    # Se a consulta foi corrigida, atualiza o resultado
+                    if validated_query != captured_query and isinstance(result, dict) and "output" in result:
+                        result["output"] += "\n\nA consulta foi corrigida pelo validador."
+        else:
+            # Se não houver consulta capturada, não há o que validar
+            final_query = None
+
+        # Adiciona ao cache
+        self.add_query_to_cache(user_question, result, final_query)
+
+        # Retorna tanto o resultado quanto a query validada
+        return result, final_query
 
