@@ -1,0 +1,269 @@
+# Máximo de linhas de amostra por tabela
+
+# Regras de Código
+code_style:
+  python:
+    max_line_length: 100
+    docstring_style: "google"  # Estilo de docstrings a ser seguido
+    type_hints: "required"     # Tipos são obrigatórios em assinaturas de função
+    test_coverage: 80         # Cobertura mínima de testes
+    required_imports:          # Importações obrigatórias
+      - "typing"
+      - "sqlalchemy"
+      - "langchain_community"
+      - "langchain_core"
+
+# Regras de Documentação
+documentation:
+  required_sections:
+    - "Descrição"
+    - "Args"
+    - "Returns"
+    - "Raises"
+    - "Exemplos"
+  min_docstring_length: 50
+  sql_examples_required: true  # Exige exemplos de consultas SQL na documentação
+
+# Regras de Performance
+performance:
+  max_query_execution_time: 10  # segundos
+  cache_ttl: 3600              # 1 hora em segundos
+  max_parallel_queries: 5      # Número máximo de consultas paralelas
+  query_timeout: 30            # Timeout em segundos para consultas
+
+# Regras de Qualidade
+quality:
+  max_cyclomatic_complexity: 10
+  max_parameters_per_function: 5
+  max_nested_blocks: 3
+  required_error_handling:  # Tratamento de erros obrigatório
+    - "sql_errors"
+    - "connection_errors"
+    - "timeout_errors"
+
+# Regras de Versionamento
+versioning:
+  branch_naming: "^(feature|bugfix|hotfix|release)/[a-z0-9-]+$"
+  commit_message: "^(feat|fix|docs|style|refactor|test|chore)\\([a-z]+\\): .{10,72}"
+
+# Regras de Dependências
+dependencies:
+  python_version: ">=3.9,<3.12"
+  required_packages:
+    - "langchain>=0.1.0"
+    - "langchain-community>=0.0.10"
+    - "sqlalchemy>=2.0.0"
+    - "psycopg2-binary>=2.9.0"
+    - "python-dotenv>=1.0.0"
+  security_scan: true
+  license_check: true
+
+# Regras de Logging
+logging:
+  sensitive_data_redaction: true
+  required_fields:
+    - "timestamp"
+    - "level"
+    - "message"
+    - "request_id"
+    - "execution_time_ms"
+  log_levels:
+    - "INFO"
+    - "WARNING"
+    - "ERROR"
+    - "CRITICAL"
+
+# Regras de Testes
+testing:
+  min_test_cases_per_feature: 3
+  required_test_types:
+    - "unit"
+    - "integration"
+    - "e2e"
+  test_timeout: 60  # segundos
+  required_test_coverage:
+    overall: 80
+    critical_path: 90
+
+# Regras de Monitoramento
+monitoring:
+  required_metrics:
+    - "query_execution_time"
+    - "error_rate"
+    - "cache_hit_ratio"
+    - "llm_api_calls"
+    - "sql_queries_count"
+  alert_rules:
+    - "error_rate > 5% for 5m"
+    - "p99_latency > 10s for 10m"
+    - "llm_api_errors > 0 for 5m"
+
+# Regras de Tratamento de Dados
+data_handling:
+  sensitive_fields:
+    - "password"
+    - "token"
+    - "api_key"
+    - "email"
+    - "phone"
+    - "cpf"
+    - "cnpj"
+    - "credit_card"
+  data_retention: 30  # dias
+  anonymization_required: true
+
+# Regras de Internacionalização
+i18n:
+  default_locale: "pt_BR"
+  supported_locales:
+    - "pt_BR"
+    - "en_US"
+
+# Regras Específicas para LangChain
+langchain:
+  agent_type: "openai-tools"
+  required_tools:
+    - "sql_db_query"
+    - "sql_db_schema"
+  temperature: 0  # Para maior previsibilidade
+  max_iterations: 10
+  early_stopping_method: "generate"
+
+# Regras para Modelos de Linguagem
+llm:
+  default_model: "gpt-4"
+  fallback_model: "gpt-3.5-turbo"
+  max_tokens: 2000
+  temperature_range:
+    min: 0
+    max: 0.7
+  rate_limiting:
+    requests_per_minute: 60
+    max_retries: 3
+
+# Otimizações para Odoo
+odoo_optimizations:
+  use_materialized_views: true
+  precompute_common_joins: true
+  cache_metadata: true
+  batch_size: 1000
+  max_workers: 4
+
+# Regras para Embeddings
+embeddings:
+  model: "text-embedding-3-large"
+  batch_size: 32
+  cache_dir: "./.embeddings_cache"
+  normalize_embeddings: true
+
+# Regras para Vetorização
+vector_store:
+  type: "Chroma"  # Ou outro vetor store suportado
+  persist_directory: "./chroma_db"
+  search_kwargs:
+    k: 5  # Número de resultados por busca
+
+# Regras para Tratamento de Erros
+error_handling:
+  max_retries: 3
+  backoff_factor: 1
+  retry_on_status_codes:
+    - 429  # Too Many Requests
+    - 500  # Internal Server Error
+    - 502  # Bad Gateway
+    - 503  # Service Unavailable
+    - 504  # Gateway Timeout
+# Regras de Código
+code_style:
+  python:
+    max_line_length: 100
+    docstring_style: "google"  # Estilo de docstrings a ser seguido
+    type_hints: "required"     # Tipos são obrigatórios em assinaturas de função
+    test_coverage: 80         # Cobertura mínima de testes
+
+# Regras de Documentação
+documentation:
+  required_sections:
+    - "Descrição"
+    - "Parâmetros"
+    - "Retorno"
+    - "Exceções"
+    - "Exemplos"
+  min_docstring_length: 50    # Tamanho mínimo para docstrings
+
+# Regras de Performance
+performance:
+  max_query_execution_time: 5  # segundos
+  cache_ttl: 3600             # 1 hora em segundos
+
+# Regras de Qualidade
+quality:
+  max_cyclomatic_complexity: 10
+  max_parameters_per_function: 5
+  max_nested_blocks: 3
+
+# Regras de Versionamento
+versioning:
+  branch_naming: "^(feature|bugfix|hotfix|release)/[a-z0-9-]+$"
+  commit_message: "^(feat|fix|docs|style|refactor|test|chore)\\([a-z]+\\): .{10,72}"
+
+# Regras de Dependências
+dependencies:
+  python_version: ">=3.9,<3.12"
+  security_scan: true
+  license_check: true
+
+# Regras de Logging
+logging:
+  sensitive_data_redaction: true
+  required_fields:
+    - "timestamp"
+    - "level"
+    - "message"
+    - "request_id"
+
+# Regras de Testes
+testing:
+  min_test_cases_per_feature: 3
+  required_test_types:
+    - "unit"
+    - "integration"
+  test_timeout: 30  # segundos
+
+# Regras de Deploy
+deployment:
+  required_approvals: 1
+  environments:
+    - name: "development"
+      auto_deploy: true
+    - name: "staging"
+      auto_deploy: false
+    - name: "production"
+      auto_deploy: false
+      required_approvals: 2
+
+# Regras de Monitoramento
+monitoring:
+  required_metrics:
+    - "query_execution_time"
+    - "error_rate"
+    - "cache_hit_ratio"
+  alert_rules:
+    - "error_rate > 5% for 5m"
+    - "p99_latency > 10s for 10m"
+
+# Regras de Tratamento de Dados
+data_handling:
+  sensitive_fields:
+    - "password"
+    - "token"
+    - "api_key"
+    - "email"
+  data_retention: 30  # dias
+
+# Regras de Internacionalização
+i18n:
+  default_locale: "pt_BR"
+  supported_locales:
+    - "pt_BR"
+    - "en_US"

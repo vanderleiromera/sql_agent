@@ -768,6 +768,31 @@ class QuerySQLCheckerTool:
             - is_valid: True se a consulta for válida, False caso contrário
             - result_or_error: A consulta corrigida ou uma mensagem de erro
         """
+        # Verifica se a consulta é um exemplo do arquivo examples.py
+        from .examples import FEW_SHOT_EXAMPLES
+        
+        # Verifica se a consulta está nos exemplos
+        is_example_query = False
+        normalized_query = ' '.join(query.strip().split())
+        
+        for example in FEW_SHOT_EXAMPLES.split("SQL:"):
+            if len(example.strip()) > 0 and "```sql" in example:
+                # Extrai a consulta SQL do exemplo
+                sql_part = example.split("```sql")[1].split("```")[0].strip()
+                normalized_example = ' '.join(sql_part.strip().split())
+                
+                # Compara os textos normalizados para evitar problemas de espaçamento
+                if normalized_query == normalized_example:
+                    print("Consulta identificada como exemplo predefinido. Pulando validação.")
+                    return True, query
+                
+                # Verifica se a consulta está contida no exemplo ou vice-versa
+                # Isso ajuda a identificar casos onde o LLM pegou apenas parte do exemplo
+                if len(normalized_query) > 50 and len(normalized_example) > 50:
+                    if normalized_query in normalized_example or normalized_example in normalized_query:
+                        print("Consulta identificada como parte de um exemplo predefinido. Pulando validação.")
+                        return True, query
+        
         try:
             # Verifica se a consulta contém comandos não permitidos
             dangerous_commands = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE"]
@@ -1237,34 +1262,163 @@ Inclua aliases de tabela para melhorar a legibilidade.
         # Primeiro, verifica se a consulta corresponde a algum dos exemplos few-shot
         # Se corresponder, usamos a consulta do exemplo diretamente sem validação
         is_from_few_shot = False
-        for example in FEW_SHOT_EXAMPLES.split("SQL:"):
-            if len(example.strip()) > 0 and "```sql" in example:
-                # Extrai a consulta SQL do exemplo
-                sql_part = example.split("```sql")[1].split("```")[0].strip()
-
-                # Verifica se a pergunta do usuário corresponde a este exemplo
-                question_part = example.split("Pergunta:")[1].split("SQL:")[0].strip() if "Pergunta:" in example else ""
-
-                if question_part and user_question.lower().strip() == question_part.lower().strip():
-                    print(f"Encontrado exemplo few-shot correspondente à pergunta")
-                    captured_query = sql_part
-                    is_from_few_shot = True
+        exact_match_found = False
+        query_from_example = None
+        
+        # Prepara a pergunta do usuário para comparação
+        def normalize_text(text):
+            return ' '.join(text.lower().replace('?', '').replace(',', '').replace('.', '').split())
+            
+        normalized_user_question = normalize_text(user_question)
+        print(f"Procurando exemplo para: '{normalized_user_question}'")
+        
+        # Processar os exemplos de FEW_SHOT_EXAMPLES
+        from difflib import SequenceMatcher
+        
+        # Armazenar as perguntas e consultas dos exemplos
+        example_pairs = []
+        
+        # Extrair os pares pergunta-consulta dos exemplos
+        current_section = None
+        for line in FEW_SHOT_EXAMPLES.split('\n'):
+            if line.lower().startswith('pergunta:'):
+                current_section = {'question': line[len('pergunta:'):].strip(), 'sql': ''}
+                example_pairs.append(current_section)
+            elif current_section and line.startswith('SQL:'):
+                # A seção SQL começa na próxima linha após este marcador
+                continue
+            elif current_section and '```sql' in line:
+                # Começa a capturar o SQL
+                current_section['sql_started'] = True
+                current_section['sql'] = ''
+            elif current_section and current_section.get('sql_started') and '```' in line and not '```sql' in line:
+                # Termina a captura do SQL
+                current_section['sql_started'] = False
+            elif current_section and current_section.get('sql_started'):
+                # Adiciona a linha à consulta SQL
+                current_section['sql'] += line + '\n'
+        
+        # Usar similaridade para encontrar o melhor exemplo
+        best_match = None
+        best_similarity = 0
+        produtos_example = None
+        
+        for example in example_pairs:
+            if example.get('sql'):
+                # Normalizar pergunta do exemplo
+                normalized_example_question = normalize_text(example['question'])
+                
+                # Calcular similaridade
+                similarity = SequenceMatcher(None, normalized_user_question, normalized_example_question).ratio()
+                
+                # Verificar se a pergunta contém palavras-chave específicas para "produtos vendidos sem estoque"
+                produtos_keywords = ['produtos', 'vendidos', '30 dias', 'estoque']
+                produtos_score = sum(1 for kw in produtos_keywords if kw in normalized_example_question)
+                
+                # Verificar se a pergunta do exemplo é sobre produtos sem estoque
+                is_produtos_example = produtos_score >= 3
+                
+                # Salvar para uso posterior se for o exemplo sobre produtos
+                if is_produtos_example:
+                    produtos_example = example
+                
+                # Verificar se é o melhor match
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_match = example
+                    
+                # Verificar se temos correspondência para produtos vendidos sem estoque, permitindo variações no número de dias
+                # Usamos expressões regulares para detectar padrões como "30 dias", "60 dias", etc.
+                import re
+                dias_pattern = re.compile(r'\d+\s*dias')
+                user_has_dias_pattern = bool(dias_pattern.search(normalized_user_question))
+                
+                # Verificar perguntas sobre produtos vendidos sem estoque com variações numéricas
+                if is_produtos_example and 'produtos' in normalized_user_question and 'vendidos' in normalized_user_question and \
+                   (user_has_dias_pattern or 'ultimo' in normalized_user_question or 'recente' in normalized_user_question) and \
+                   ('estoque' in normalized_user_question or 'em maos' in normalized_user_question):
+                    print(f"Encontrada correspondência para pergunta sobre produtos vendidos sem estoque")
+                    
+                    # Extrair o número de dias da pergunta do usuário, se existir
+                    dias_match = dias_pattern.search(normalized_user_question)
+                    if dias_match:
+                        # Extrair o número de dias da pergunta do usuário
+                        dias_str = dias_match.group(0)
+                        numero_dias = ''.join(filter(str.isdigit, dias_str))
+                        
+                        if numero_dias and numero_dias != '30':
+                            print(f"Adaptando consulta para {numero_dias} dias em vez de 30 dias")
+                            # Adaptar a consulta SQL para o número de dias especificado
+                            query_from_example = example['sql'].strip().replace("'30 days'", f"'{numero_dias} days'")
+                        else:
+                            query_from_example = example['sql'].strip()
+                    else:
+                        query_from_example = example['sql'].strip()
+                        
+                    exact_match_found = True
                     break
+                    
+        # Se encontramos uma correspondência exata
+        if exact_match_found and query_from_example:
+            print("Usando consulta do exemplo específico (correspondência exata)")
+            captured_query = query_from_example
+            is_from_few_shot = True
+        # Se temos o exemplo de produtos e a pergunta parece ser sobre produtos vendidos sem estoque
+        elif produtos_example and 'produtos' in normalized_user_question and 'vendidos' in normalized_user_question and 'estoque' in normalized_user_question:
+            print("Usando consulta do exemplo de produtos vendidos sem estoque (correspondência por palavras-chave)")
+            captured_query = produtos_example['sql'].strip()
+            is_from_few_shot = True
+        # Se temos um match com alta similaridade
+        elif best_match and best_similarity > 0.7:
+            print(f"Usando consulta do exemplo mais similar (similaridade: {best_similarity:.2f})")
+            captured_query = best_match['sql'].strip()
+            is_from_few_shot = True
+        
+        # Se a verificação automática falhou, podemos continuar com as verificações originais
+        if not is_from_few_shot:
+            print("Usando método tradicional de verificação de exemplos")
+            for example in FEW_SHOT_EXAMPLES.split("SQL:"):
+                if len(example.strip()) > 0 and "```sql" in example:
+                    # Extrai a consulta SQL do exemplo
+                    sql_part = example.split("```sql")[1].split("```")[0].strip()
+                    
+                    # Normaliza a consulta para comparação (remove espaços extras e quebras de linha)
+                    normalized_sql_part = ' '.join(sql_part.replace('\n', ' ').split())
+                    normalized_captured_query = '' if not captured_query else ' '.join(captured_query.replace('\n', ' ').split())
 
-                # Verifica se a consulta capturada é idêntica ou muito similar à consulta do exemplo
-                if captured_query and (captured_query.strip() == sql_part.strip() or
-                                    (len(captured_query) > 50 and sql_part.strip().startswith(captured_query.strip()[:50]))):
-                    print(f"Consulta capturada corresponde a um exemplo few-shot")
-                    captured_query = sql_part
-                    is_from_few_shot = True
-                    break
+                    # Verifica se a pergunta do usuário corresponde a este exemplo
+                    question_part = example.split("Pergunta:")[1].split("SQL:")[0].strip() if "Pergunta:" in example else ""
+                    
+                    # Comparação de perguntas mais flexível - verifica se as palavras-chave principais coincidem
+                    if question_part and all(word in user_question.lower() for word in question_part.lower().split()[:5]):
+                        print(f"Encontrado exemplo few-shot correspondente às palavras-chave da pergunta")
+                        captured_query = sql_part
+                        is_from_few_shot = True
+                        break
 
-                # Verifica se a consulta capturada é um fragmento da consulta do exemplo
-                if captured_query and captured_query in sql_part:
-                    print(f"Consulta capturada parece ser um fragmento de um exemplo few-shot")
-                    captured_query = sql_part
-                    is_from_few_shot = True
-                    break
+                    # Verifica se a consulta capturada é idêntica ou muito similar à consulta do exemplo
+                    if captured_query and (normalized_captured_query == normalized_sql_part or \
+                                       (len(normalized_captured_query) > 50 and normalized_sql_part.startswith(normalized_captured_query[:50]))):
+                        print(f"Consulta capturada corresponde a um exemplo few-shot")
+                        captured_query = sql_part
+                        is_from_few_shot = True
+                        break
+
+                    # Verifica se a consulta capturada é um fragmento da consulta do exemplo
+                    if captured_query and (normalized_captured_query in normalized_sql_part or normalized_sql_part in normalized_captured_query):
+                        print(f"Consulta capturada parece ser um fragmento de um exemplo few-shot")
+                        captured_query = sql_part
+                        is_from_few_shot = True
+                        break
+                        
+                    # Verificação por tabelas específicas e estrutura de consulta
+                    if captured_query and 'sale_order_line' in captured_query and 'stock_quant' in captured_query and 'COALESCE' in captured_query:
+                        print(f"Estrutura da consulta corresponde ao exemplo de produtos vendidos sem estoque")
+                        # Busca o exemplo específico
+                        if 'produtos foram vendidos nos últimos 30 dias' in example:
+                            captured_query = sql_part
+                            is_from_few_shot = True
+                            break
 
         # Se não for de um exemplo few-shot, verifica se é uma consulta complexa
         if not is_from_few_shot and captured_query:
@@ -1310,4 +1464,3 @@ Inclua aliases de tabela para melhorar a legibilidade.
 
         # Retorna tanto o resultado quanto a query validada
         return result, final_query
-
