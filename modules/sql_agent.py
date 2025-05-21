@@ -1,5 +1,6 @@
 # arquivo: modules/sql_agent.py
 from langchain_chroma import Chroma
+from typing import Optional, Dict, Any, List, Tuple, Union, Pattern, Match, Callable
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 # Importações corrigidas:
 from langchain_community.agent_toolkits.sql.base import create_sql_agent
@@ -13,7 +14,6 @@ import pickle
 import pandas as pd
 import hashlib
 import json
-from typing import List, Dict, Any, Optional, Tuple
 from .config import Config
 # Importações adicionadas para Callbacks
 from langchain.callbacks.base import BaseCallbackHandler
@@ -671,12 +671,263 @@ TABLE DATA SAMPLES: {table_name}
 
 # --- Classe de Callback para Capturar a Query SQL ---
 class SQLQueryCaptureCallback(BaseCallbackHandler):
-    """Callback handler to capture the input query for SQL tools."""
+    """Callback handler para capturar e interceptar consultas SQL.
+    
+    Este handler é capaz de capturar consultas SQL geradas pelo agente e potencialmente
+    substituí-las por consultas adaptadas de exemplos conhecidos, permitindo maior
+    precisão e controle sobre as consultas executadas no banco de dados.
+    """
     def __init__(self):
         super().__init__()
         self.sql_query: Optional[str] = None
         self.start_time: Optional[float] = None
         self.exec_time: Optional[float] = None
+        self.user_question: Optional[str] = None
+        # Flags para controle de exemplos
+        self.example_similarity_computed: bool = False
+        self.usando_exemplo_adaptado: bool = False
+        # Configurações para adaptação genérica
+        self.generic_adaptations: List[Dict[str, Any]] = [
+            # Adaptação de períodos em dias
+            {
+                "name": "interval_days",
+                "sql_pattern": r"INTERVAL\s+'(\d+)\s+days'",
+                "question_pattern": r"\b(\d+)\s*dias\b",
+                "replace_template": "'{}' days'"
+            },
+            # Adaptação de anos
+            {
+                "name": "year",
+                "sql_pattern": r"EXTRACT\s*\(\s*YEAR\s+FROM\s+[^\)]+\)\s*=\s*(\d{4})",
+                "question_pattern": r"\b(19|20\d{2})\b", 
+                "replace_template": "= {}"
+            },
+            # Adaptação de limites (LIMIT)
+            {
+                "name": "limit",
+                "sql_pattern": r"LIMIT\s+(\d+)",
+                "question_pattern": r"\b(\d+)\s*produtos\b",
+                "replace_template": "LIMIT {}"
+            },
+            # Adaptação de TOP N
+            {
+                "name": "top_n",
+                "sql_pattern": r"TOP\s+(\d+)",
+                "question_pattern": r"\b(\d+)\s*(primeiros|principais|melhores)\b",
+                "replace_template": "TOP {}"
+            },
+            # Adaptação de períodos em meses
+            {
+                "name": "interval_months",
+                "sql_pattern": r"INTERVAL\s+'(\d+)\s+month(s)?'",
+                "question_pattern": r"\b(\d+)\s*m[êe]s(es)?\b",
+                "replace_template": "'{}' month'"
+            }
+        ]
+    
+    def set_user_question(self, question: str):
+        """Define a pergunta do usuário para possível análise de exemplos."""
+        self.user_question = question
+        self.example_similarity_computed = False
+    
+    def apply_generic_adaptations(self, query: str, user_question: str) -> str:
+        """Aplica adaptações genéricas a uma consulta SQL baseado em padrões na pergunta do usuário.
+        
+        Esta função processa a consulta SQL e a pergunta do usuário, tentando identificar
+        padrões que indicam adaptações potenciais, como mudanças em períodos de tempo,
+        limites de resultados, ou filtros de anos. Adaptações são aplicadas automaticamente
+        sem necessidade de codificar regras específicas para cada tipo de consulta.
+        
+        Args:
+            query: A consulta SQL original a ser adaptada
+            user_question: A pergunta do usuário em linguagem natural
+            
+        Returns:
+            str: A consulta SQL adaptada, ou a original se nenhuma adaptação foi aplicada
+        """
+        import re
+        normalized_question = user_question.lower()
+        adapted_query = query
+        adaptations_applied = []
+        
+        # Aplica cada adaptação genérica configurada
+        for adaptation in self.generic_adaptations:
+            # Procura o padrão na consulta SQL
+            sql_pattern = re.compile(adaptation["sql_pattern"])
+            sql_match = sql_pattern.search(adapted_query)
+            
+            # Procura o padrão correspondente na pergunta do usuário
+            question_pattern = re.compile(adaptation["question_pattern"])
+            question_match = question_pattern.search(normalized_question)
+            
+            # Se ambos os padrões foram encontrados, aplica a adaptação
+            if sql_match and question_match:
+                original_value = sql_match.group(1)
+                new_value = question_match.group(1)
+                
+                # Verifica se os valores são diferentes
+                if original_value != new_value:
+                    # Extrai o texto completo que deve ser substituído
+                    to_replace = sql_match.group(0)
+                    # Cria o texto de substituição
+                    replacement = to_replace.replace(original_value, new_value)
+                    # Aplica a substituição
+                    adapted_query = adapted_query.replace(to_replace, replacement)
+                    
+                    # Registra a adaptação aplicada
+                    adaptations_applied.append({
+                        "type": adaptation["name"],
+                        "original": original_value,
+                        "new": new_value
+                    })
+        
+        # Registra as adaptações realizadas
+        if adaptations_applied:
+            self.usando_exemplo_adaptado = True
+            adaptations_str = ", ".join([f"{a['type']}: {a['original']} → {a['new']}" for a in adaptations_applied])
+            print(f"Adaptações genéricas aplicadas: {adaptations_str}")
+        
+        return adapted_query
+    
+    def check_and_adapt_query_from_examples(self, query: str) -> str:
+        """Verifica se a consulta deve ser substituída por um exemplo adaptado.
+        
+        Esta função analisa a pergunta do usuário e a compara com exemplos conhecidos,
+        buscando correspondências que permitam adaptar a consulta corretamente. Também
+        aplica adaptações genéricas para casos que não correspondem a exemplos específicos.
+        
+        Args:
+            query: A consulta SQL original a ser potencialmente substituída
+            
+        Returns:
+            str: A consulta adaptada de um exemplo ou a consulta original com adaptações genéricas
+        """
+        if not self.user_question or self.example_similarity_computed:
+            return query
+        
+        # Marca que já computamos a similaridade com exemplos para evitar processamento repetido
+        self.example_similarity_computed = True
+        
+        # Prepara a pergunta do usuário para comparação
+        def normalize_text(text):
+            return ' '.join(text.lower().replace('?', '').replace(',', '').replace('.', '').split())
+        
+        normalized_user_question = normalize_text(self.user_question)
+        
+        # Processamento dos exemplos
+        from difflib import SequenceMatcher
+        import re
+        
+        # Extrair os pares pergunta-consulta dos exemplos
+        from modules.examples import FEW_SHOT_EXAMPLES
+        example_pairs = []
+        current_section = None
+        
+        for line in FEW_SHOT_EXAMPLES.split('\n'):
+            if line.lower().startswith('pergunta:'):
+                current_section = {'question': line[len('pergunta:'):].strip(), 'sql': ''}
+                example_pairs.append(current_section)
+            elif current_section and line.startswith('SQL:'):
+                continue
+            elif current_section and '```sql' in line:
+                current_section['sql_started'] = True
+                current_section['sql'] = ''
+            elif current_section and current_section.get('sql_started') and '```' in line and not '```sql' in line:
+                current_section['sql_started'] = False
+            elif current_section and current_section.get('sql_started'):
+                current_section['sql'] += line + '\n'
+        
+        # Padrões para detecção
+        nivel_estoque_keywords = ['nivel', 'estoque', 'produtos', 'vendidos', 'valor']
+        produtos_sem_estoque_keywords = ['produtos', 'vendidos', 'dias', 'estoque', 'tem', 'maos']
+        
+        ano_pattern = re.compile(r'\b(19|20)\d{2}\b')  # Detecta anos entre 1900 e 2099
+        dias_pattern = re.compile(r'\b(\d+)\s*(dias|dias)\b')  # Detecta padrões como "30 dias", "60 dias"
+        
+        user_has_ano_pattern = bool(ano_pattern.search(normalized_user_question))
+        user_has_dias_pattern = bool(dias_pattern.search(normalized_user_question))
+        
+        # 1. Verificar correspondência com exemplo de nível de estoque
+        if all(kw in normalized_user_question for kw in ['nivel', 'estoque', 'produtos', 'vendidos']) and 'valor' in normalized_user_question and user_has_ano_pattern:
+            for example in example_pairs:
+                if example.get('sql'):
+                    normalized_example_question = normalize_text(example['question'])
+                    # Verificar se é o exemplo de nível de estoque
+                    if all(kw in normalized_example_question for kw in nivel_estoque_keywords) and 'valor' in normalized_example_question:
+                        print(f"Encontrado exemplo correspondente para nível de estoque dos produtos mais vendidos")
+                        
+                        # Extrair o ano da pergunta do usuário
+                        ano_match = ano_pattern.search(normalized_user_question)
+                        if ano_match:
+                            ano = ano_match.group(0)
+                            sql = example['sql'].strip()
+                            
+                            # Procurar o padrão de ano no SQL e substituí-lo
+                            ano_sql_pattern = re.compile(r'AND\s+EXTRACT\s*\(\s*YEAR\s+FROM\s+[^\)]+\)\s*=\s*(\d{4})')
+                            ano_sql_match = ano_sql_pattern.search(sql)
+                            
+                            if ano_sql_match:
+                                ano_original = ano_sql_match.group(1)
+                                if ano != ano_original:
+                                    print(f"Adaptando consulta para o ano {ano} em vez de {ano_original}")
+                                    sql = sql.replace(f"= {ano_original}", f"= {ano}")
+                                    
+                                    # Extrai o número da LIMIT se presente na pergunta
+                                    num_pattern = re.compile(r'\b(\d+)\s*produtos')
+                                    num_match = num_pattern.search(normalized_user_question)
+                                    if num_match:
+                                        num_produtos = num_match.group(1)
+                                        # Substituir o LIMIT original pelo solicitado
+                                        limit_pattern = re.compile(r'LIMIT\s+(\d+)')
+                                        limit_match = limit_pattern.search(sql)
+                                        if limit_match:
+                                            limit_original = limit_match.group(1)
+                                            sql = sql.replace(f"LIMIT {limit_original}", f"LIMIT {num_produtos}")
+                                    
+                                    print("Usando consulta adaptada do exemplo de nível de estoque")
+                                    self.usando_exemplo_adaptado = True
+                                    return sql
+        
+        # 2. Verificar correspondência com exemplo de produtos vendidos sem estoque
+        if ('produtos' in normalized_user_question or 'quais' in normalized_user_question) and \
+           'vendidos' in normalized_user_question and \
+           ('ultimos' in normalized_user_question or 'recentes' in normalized_user_question or user_has_dias_pattern) and \
+           ('estoque' in normalized_user_question and ('nao' in normalized_user_question or 'sem' in normalized_user_question or 'tem' in normalized_user_question or 'maos' in normalized_user_question)):
+            
+            for example in example_pairs:
+                if example.get('sql'):
+                    normalized_example_question = normalize_text(example['question'])
+                    
+                    # Verificar se é o exemplo de produtos sem estoque
+                    produtos_sem_estoque_score = sum(1 for kw in produtos_sem_estoque_keywords if kw in normalized_example_question)
+                    if produtos_sem_estoque_score >= 4 and 'ultimos' in normalized_example_question and 'dias' in normalized_example_question:
+                        print(f"Encontrado exemplo correspondente para produtos vendidos sem estoque")
+                        
+                        sql = example['sql'].strip()
+                        
+                        # Extrair o número de dias da pergunta do usuário
+                        dias_match = dias_pattern.search(normalized_user_question)
+                        if dias_match:
+                            # Extrair o número de dias
+                            num_dias = dias_match.group(1)
+                            
+                            # Procurar o padrão de dias no SQL
+                            dias_sql_pattern = re.compile(r"INTERVAL\s+'(\d+)\s+days'")
+                            dias_sql_match = dias_sql_pattern.search(sql)
+                            
+                            if dias_sql_match:
+                                dias_original = dias_sql_match.group(1)
+                                if num_dias != dias_original:
+                                    print(f"Adaptando consulta para {num_dias} dias em vez de {dias_original} dias")
+                                    sql = sql.replace(f"'{dias_original} days'", f"'{num_dias} days'")
+                        
+                            print("Usando consulta adaptada do exemplo de produtos sem estoque")
+                            self.usando_exemplo_adaptado = True
+                            return sql
+        
+        # Se chegou aqui, nenhum exemplo correspondente foi encontrado
+        # Tenta aplicar adaptações genéricas
+        return self.apply_generic_adaptations(query, self.user_question)
 
     def on_tool_start(
         self, serialized: Dict[str, Any], input_str: str, **kwargs: Any
@@ -690,6 +941,7 @@ class SQLQueryCaptureCallback(BaseCallbackHandler):
 
             # O input_str pode ser a query diretamente ou um JSON stringificado
             potential_query = None
+            input_data = None
             try:
                 # Tenta decodificar como JSON se for um dict stringificado
                 input_data = json.loads(input_str)
@@ -702,9 +954,24 @@ class SQLQueryCaptureCallback(BaseCallbackHandler):
                 # Se input_str não for string-like
                 potential_query = str(input_str) # Tenta converter
 
-            # Armazena apenas se for uma query SELECT (para evitar armazenar resultados de checker)
+            # Armazena e potencialmente modifica a query se for uma SELECT
             if potential_query and isinstance(potential_query, str) and "SELECT" in potential_query.upper():
-                self.sql_query = potential_query
+                # Verifica se devemos adaptar a query baseado em exemplos
+                adapted_query = self.check_and_adapt_query_from_examples(potential_query)
+                
+                # Se a query foi adaptada, substitua no input original
+                if self.usando_exemplo_adaptado and adapted_query != potential_query:
+                    if input_data and isinstance(input_data, dict):
+                        input_data['query'] = adapted_query
+                        # Substitui o input original pela versão modificada
+                        serialized["inputs"] = json.dumps(input_data)
+                    else:
+                        serialized["inputs"] = adapted_query
+                    
+                    print(f"--- Consulta adaptada para exemplo: {adapted_query} ---")
+                
+                # Armazena a query final (original ou adaptada)
+                self.sql_query = adapted_query if self.usando_exemplo_adaptado else potential_query
                 print(f"--- Callback: Query SQL capturada: {self.sql_query} ---") # Log no console
 
     def on_tool_end(self, output: str, **kwargs: Any) -> Any:
@@ -1230,6 +1497,8 @@ Inclua aliases de tabela para melhorar a legibilidade.
 
         # Reseta o callback antes de cada consulta
         self.query_callback_handler.reset()
+        # Passa a pergunta do usuário para o callback para possível análise de exemplos
+        self.query_callback_handler.set_user_question(user_question)
 
         # Encontra tabelas relevantes para a consulta
         relevant_tables = self.find_relevant_tables(user_question)
@@ -1301,7 +1570,8 @@ Inclua aliases de tabela para melhorar a legibilidade.
         # Usar similaridade para encontrar o melhor exemplo
         best_match = None
         best_similarity = 0
-        produtos_example = None
+        produtos_sem_estoque_example = None
+        produtos_mais_vendidos_example = None
         
         for example in example_pairs:
             if example.get('sql'):
@@ -1311,30 +1581,36 @@ Inclua aliases de tabela para melhorar a legibilidade.
                 # Calcular similaridade
                 similarity = SequenceMatcher(None, normalized_user_question, normalized_example_question).ratio()
                 
-                # Verificar se a pergunta contém palavras-chave específicas para "produtos vendidos sem estoque"
-                produtos_keywords = ['produtos', 'vendidos', '30 dias', 'estoque']
-                produtos_score = sum(1 for kw in produtos_keywords if kw in normalized_example_question)
+                # Verificar se é o exemplo de produtos vendidos sem estoque
+                produtos_sem_estoque_keywords = ['produtos', 'vendidos', 'dias', 'estoque', 'maos']
+                produtos_sem_estoque_score = sum(1 for kw in produtos_sem_estoque_keywords if kw in normalized_example_question)
+                is_produtos_sem_estoque = produtos_sem_estoque_score >= 3 and 'tem estoque' in normalized_example_question
                 
-                # Verificar se a pergunta do exemplo é sobre produtos sem estoque
-                is_produtos_example = produtos_score >= 3
+                # Verificar se é o exemplo de nível de estoque dos mais vendidos
+                nivel_estoque_keywords = ['nivel', 'estoque', 'produtos', 'vendidos', 'valor']
+                nivel_estoque_score = sum(1 for kw in nivel_estoque_keywords if kw in normalized_example_question)
+                is_nivel_estoque = nivel_estoque_score >= 3 and 'valor' in normalized_example_question
                 
-                # Salvar para uso posterior se for o exemplo sobre produtos
-                if is_produtos_example:
-                    produtos_example = example
+                # Salvar os exemplos específicos para uso posterior
+                if is_produtos_sem_estoque:
+                    produtos_sem_estoque_example = example
+                if is_nivel_estoque:
+                    produtos_mais_vendidos_example = example
                 
                 # Verificar se é o melhor match
                 if similarity > best_similarity:
                     best_similarity = similarity
                     best_match = example
                     
-                # Verificar se temos correspondência para produtos vendidos sem estoque, permitindo variações no número de dias
-                # Usamos expressões regulares para detectar padrões como "30 dias", "60 dias", etc.
+                # Uso de expressões regulares para detectar padrões numéricos
                 import re
                 dias_pattern = re.compile(r'\d+\s*dias')
+                ano_pattern = re.compile(r'\b(19|20)\d{2}\b')  # Detecta anos entre 1900 e 2099
                 user_has_dias_pattern = bool(dias_pattern.search(normalized_user_question))
+                user_has_ano_pattern = bool(ano_pattern.search(normalized_user_question))
                 
                 # Verificar perguntas sobre produtos vendidos sem estoque com variações numéricas
-                if is_produtos_example and 'produtos' in normalized_user_question and 'vendidos' in normalized_user_question and \
+                if is_produtos_sem_estoque and 'produtos' in normalized_user_question and 'vendidos' in normalized_user_question and \
                    (user_has_dias_pattern or 'ultimo' in normalized_user_question or 'recente' in normalized_user_question) and \
                    ('estoque' in normalized_user_question or 'em maos' in normalized_user_question):
                     print(f"Encontrada correspondência para pergunta sobre produtos vendidos sem estoque")
@@ -1357,16 +1633,73 @@ Inclua aliases de tabela para melhorar a legibilidade.
                         
                     exact_match_found = True
                     break
+                
+                # Verificar perguntas sobre nível de estoque dos produtos mais vendidos em valor
+                elif is_nivel_estoque and 'nivel' in normalized_user_question and 'estoque' in normalized_user_question and \
+                     'produtos' in normalized_user_question and 'vendidos' in normalized_user_question and \
+                     'valor' in normalized_user_question and user_has_ano_pattern:
+                    print(f"Encontrada correspondência para pergunta sobre nível de estoque dos produtos mais vendidos em valor")
+                    
+                    # Extrair o ano da pergunta do usuário
+                    ano_match = ano_pattern.search(normalized_user_question)
+                    if ano_match:
+                        # Extrair o ano da pergunta do usuário
+                        ano = ano_match.group(0)
+                        
+                        # Pegar o SQL do exemplo e adaptar o ano
+                        query_from_example = example['sql'].strip()
+                        
+                        # Procurar o padrão de ano no SQL e substituí-lo
+                        ano_sql_pattern = re.compile(r'AND\s+EXTRACT\s*\(\s*YEAR\s+FROM\s+[^\)]+\)\s*=\s*(\d{4})')
+                        ano_sql_match = ano_sql_pattern.search(query_from_example)
+                        
+                        if ano_sql_match:
+                            ano_original = ano_sql_match.group(1)
+                            if ano != ano_original:
+                                print(f"Adaptando consulta para o ano {ano} em vez de {ano_original}")
+                                query_from_example = query_from_example.replace(f"= {ano_original}", f"= {ano}")
+                    else:
+                        query_from_example = example['sql'].strip()
+                        
+                    exact_match_found = True
+                    break
                     
         # Se encontramos uma correspondência exata
         if exact_match_found and query_from_example:
             print("Usando consulta do exemplo específico (correspondência exata)")
             captured_query = query_from_example
             is_from_few_shot = True
-        # Se temos o exemplo de produtos e a pergunta parece ser sobre produtos vendidos sem estoque
-        elif produtos_example and 'produtos' in normalized_user_question and 'vendidos' in normalized_user_question and 'estoque' in normalized_user_question:
+        # Se temos o exemplo de produtos sem estoque e a pergunta parece ser sobre isso
+        elif produtos_sem_estoque_example and 'produtos' in normalized_user_question and 'vendidos' in normalized_user_question and \
+             ('estoque' in normalized_user_question or 'em maos' in normalized_user_question):
             print("Usando consulta do exemplo de produtos vendidos sem estoque (correspondência por palavras-chave)")
-            captured_query = produtos_example['sql'].strip()
+            captured_query = produtos_sem_estoque_example['sql'].strip()
+            is_from_few_shot = True
+        # Se temos o exemplo de nível de estoque e a pergunta parece ser sobre isso
+        elif produtos_mais_vendidos_example and 'nivel' in normalized_user_question and 'estoque' in normalized_user_question and \
+             'produtos' in normalized_user_question and 'valor' in normalized_user_question:
+            print("Usando consulta do exemplo de nível de estoque dos produtos mais vendidos (correspondência por palavras-chave)")
+            
+            # Verificar se há um ano mencionado
+            ano_match = ano_pattern.search(normalized_user_question) if 'ano_pattern' in locals() else None
+            if ano_match:
+                ano = ano_match.group(0)
+                sql = produtos_mais_vendidos_example['sql'].strip()
+                
+                # Procurar o padrão de ano no SQL e substituí-lo
+                ano_sql_pattern = re.compile(r'AND\s+EXTRACT\s*\(\s*YEAR\s+FROM\s+[^\)]+\)\s*=\s*(\d{4})') if 're' in locals() else None
+                if ano_sql_pattern:
+                    ano_sql_match = ano_sql_pattern.search(sql)
+                    if ano_sql_match:
+                        ano_original = ano_sql_match.group(1)
+                        if ano != ano_original:
+                            print(f"Adaptando consulta para o ano {ano} em vez de {ano_original}")
+                            sql = sql.replace(f"= {ano_original}", f"= {ano}")
+                
+                captured_query = sql
+            else:
+                captured_query = produtos_mais_vendidos_example['sql'].strip()
+            
             is_from_few_shot = True
         # Se temos um match com alta similaridade
         elif best_match and best_similarity > 0.7:
@@ -1435,7 +1768,11 @@ Inclua aliases de tabela para melhorar a legibilidade.
         if captured_query:
             if is_from_few_shot:
                 print("Consulta é de um exemplo few-shot, pulando validação")
-                final_query = captured_query
+                # Se encontramos um match exato, use query_from_example, caso contrário use captured_query
+                if exact_match_found and query_from_example:
+                    final_query = query_from_example
+                else:
+                    final_query = captured_query
             else:
                 print("Validando consulta SQL...")
                 is_valid, validated_query = self.query_checker.validate_query(captured_query)
